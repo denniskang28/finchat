@@ -253,7 +253,7 @@ Running all three modes in one request ensures identical inputs and configuratio
           "page_number": 91,
           "chunk_type": "TABLE_ROW",
           "representation": "SEMANTIC_ROW",
-          "comparison_key": "p91_corporate_bonds_geography:united_states",
+          "comparison_key": "p91_t1:united_states",
           "table_title": "Corporate Bonds by Geography",
           "row_label": "United States",
           "content": "Table: Corporate Bonds by Geography...",

@@ -2,13 +2,14 @@
 
 This repository implements PDF ingestion, table extraction, evidence-backed table repair, and table-representation inspection. It does not implement embeddings, retrieval, reranking, or answer generation.
 
-The parser uses a hybrid pipeline:
+Every page uses the same hybrid pipeline; there are no page-number or document-specific parser branches:
 
 1. `pdfplumber` extracts native text, coordinates, and initial tables.
 2. Deterministic quality rules detect and repair issues supported by source tokens.
 3. Remaining low-confidence tables may be sent to a configurable multimodal provider.
 4. LLM repairs are accepted only when every replacement maps back to source PDF tokens.
-5. Raw extraction, canonical table, quality findings, and repair logs remain visible in the debug UI.
+5. Pages without ruled tables may produce a generic percentage-chart candidate only when 3-10 values form an exact 100% distribution; LLM label associations remain token-verified.
+6. Raw extraction, canonical table, quality findings, and repair logs remain visible in the debug UI.
 
 ## Run
 
@@ -22,7 +23,7 @@ docker compose up --build
 - API documentation: http://localhost:8000/docs
 - Health check: http://localhost:8000/api/health
 
-Upload the AIA 2025 PDF in the UI. Parsing is synchronous for this POC.
+Upload a PDF in the UI. Parsing is synchronous for this POC; the AIA 2025 report remains the golden validation sample.
 
 ## Table repair provider
 

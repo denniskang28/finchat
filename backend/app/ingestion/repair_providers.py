@@ -36,12 +36,23 @@ class RepairProposalResponse(BaseModel):
 
 class EvidenceValue(BaseModel):
     value: str
-    source_token_ids: list[str] = Field(min_length=1)
+    source_token_ids: list[str] = Field(default_factory=list)
 
 
 class TableReconstructionProposal(BaseModel):
     columns: list[EvidenceValue] = Field(min_length=2)
     rows: list[list[EvidenceValue]] = Field(min_length=4)
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class ChartRowProposal(BaseModel):
+    label: EvidenceValue
+    share: EvidenceValue
+
+
+class ChartExtractionProposal(BaseModel):
+    rows: list[ChartRowProposal] = Field(min_length=3)
     reason: str
     confidence: float = Field(ge=0.0, le=1.0)
 
@@ -74,6 +85,16 @@ class TableRepairProvider(ABC):
         tokens: list[SourceToken],
         image_data_url: str,
     ) -> TableReconstructionProposal | None:
+        return None
+
+    def propose_chart_extraction(
+        self,
+        *,
+        table: ParsedTable,
+        issues: list[TableIssue],
+        tokens: list[SourceToken],
+        image_data_url: str,
+    ) -> ChartExtractionProposal | None:
         return None
 
 
@@ -231,6 +252,7 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
                 f"Return exactly {len(table.columns)} columns and {len(table.rows)} rows.",
                 "Preserve every supplied dense row in the same order.",
                 "Every header and cell must include the exact source_token_ids that spell its value.",
+                "The inferred structural header 'Row label' is the only value allowed to have no source_token_ids.",
                 "Preserve source text, footnote markers, and numeric values exactly.",
                 "Do not include chart labels or narrative outside the cropped table.",
                 "Return null when the crop is ambiguous.",
@@ -290,6 +312,103 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
         if payload is None:
             return None
         return TableReconstructionProposal.model_validate(payload)
+
+    def propose_chart_extraction(
+        self,
+        *,
+        table: ParsedTable,
+        issues: list[TableIssue],
+        tokens: list[SourceToken],
+        image_data_url: str,
+    ) -> ChartExtractionProposal | None:
+        prompt = {
+            "task": "Associate labels with the percentage shares in this distribution chart.",
+            "constraints": [
+                "Return JSON only.",
+                f"Return exactly {len(table.rows)} rows.",
+                "Use every expected percentage exactly once.",
+                "Every label and share must include the exact source_token_ids that spell it.",
+                "Do not use prose percentages or labels outside the chart.",
+                "Preserve footnote markers exactly.",
+                "Return null when any label-share association is ambiguous.",
+            ],
+            "expected_shares": [
+                {
+                    "value": row.raw_cells[1],
+                    "source_token_id": row.metadata.get("share_token_id"),
+                }
+                for row in table.rows
+            ],
+            "issues": [issue.model_dump(mode="json") for issue in issues],
+            "source_tokens": [token.model_dump(mode="json") for token in tokens],
+            "response_shape": {
+                "rows": [
+                    {
+                        "label": {
+                            "value": "Exact category label",
+                            "source_token_ids": ["p1w1"],
+                        },
+                        "share": {
+                            "value": "10%",
+                            "source_token_ids": ["p1w2"],
+                        },
+                    }
+                ],
+                "reason": "Short evidence-based explanation",
+                "confidence": 0.99,
+            },
+        }
+        response = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={
+                "model": self.model,
+                "temperature": 0,
+                "enable_thinking": False,
+                "max_tokens": 3000,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You extract chart series using only supplied visual and PDF token evidence.",
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                            {"type": "text", "text": json.dumps(prompt, ensure_ascii=False)},
+                        ],
+                    },
+                ],
+            },
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "") for item in content if isinstance(item, dict)
+            )
+        match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, flags=re.DOTALL)
+        payload = json.loads(match.group(1) if match else content)
+        if payload is None:
+            return None
+        valid_rows = []
+        for candidate in payload.get("rows", []):
+            try:
+                valid_rows.append(ChartRowProposal.model_validate(candidate))
+            except ValidationError:
+                continue
+        if len(valid_rows) < 3:
+            return None
+        try:
+            confidence = float(payload.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        return ChartExtractionProposal(
+            rows=valid_rows,
+            reason=str(payload.get("reason", "")),
+            confidence=min(1.0, max(0.0, confidence)),
+        )
 
 
 def create_table_repair_provider(settings: Settings) -> TableRepairProvider:

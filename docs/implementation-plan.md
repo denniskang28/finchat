@@ -24,7 +24,7 @@ The source is a 99-page, tagged PowerPoint export with a 960 x 540 point page si
 |---:|---|---|---|
 | 70 | Risk Discount Rate and Risk Premium | One ruled table; two date groups, three measures per date, 13 market rows plus a weighted-average row; table and row footnotes | `pdfplumber.find_tables()` produced one 16 x 7 table and preserved the two-level header as merged cells plus null continuations. Values and `n/a` cells were correct. |
 | 91 | Corporate Bonds by Geography and by Sector | Two ruled tables plus a separate donut chart; common scope is Non-par and Surplus Assets; note establishes 31 Dec 2025 | The geography table was extracted exactly as 5 x 3. The sector table's right edge was joined to nearby chart geometry, so the parser must crop or discard trailing empty/chart columns. |
-| 93 | AIA China investment allocation | Donut chart with positioned labels and percentages, plus narrative bullets and two footnotes; not a table | No table was detected. Text and coordinates are available, so a small sample-specific label/value grouper can recover the five allocation categories. This is not evidence for a general chart parser. |
+| 93 | AIA China investment allocation | Donut chart with positioned labels and percentages, plus narrative bullets and two footnotes; not a table | No ruled table is detected. The generic fallback finds a compact set of 3-10 pure percentages summing to 100%, then asks the configured vision provider to associate labels; every association is verified against PDF tokens and geometry. |
 
 Verified target values:
 
@@ -45,14 +45,14 @@ Reasons:
 
 Use PyMuPDF only for document-level reading and page rendering in the application. Poppler rendering remains suitable for test fixtures and visual verification. Do not put Docling, OCR, or a vision model on the primary path for this PDF. A vision fallback may be evaluated later only when a target page has no usable embedded text or fails explicit parser assertions.
 
-The page 93 adapter is intentionally sample-specific: group the known left-side allocation labels with the nearest percentage text, validate that the five percentages total 100%, and emit a warning if the expected categories are not found. It must not be presented as generic chart extraction.
+The page 93 result uses the same generic percentage-distribution fallback available to every page. It contains no known category names or page-number routing. If the candidate percentages do not sum to 100%, the visual associations are ambiguous, or any proposed value lacks token evidence, the result remains `NEEDS_REVIEW`.
 
 ## 4. Planned POC flow
 
 ```text
 PDF upload
   -> page text and vector geometry
-  -> table candidates / targeted page-93 series
+  -> ruled-table candidates / generic percentage-chart candidates
   -> ParsedTable validation
   -> RAW_ROW + MARKDOWN + SEMANTIC_ROW renderers
   -> separate embeddings per representation
@@ -73,9 +73,9 @@ Answer generation is deliberately last. Retrieval must be judged independently b
 
 - Add page-level fixtures for pages 70, 91, and 93.
 - Implement table extraction with explicit page, bounding-box, row-count, column-count, and required-label assertions.
-- Normalize page 70's two-level headers into complete column paths.
-- Crop or trim page 91's sector table so nearby chart geometry is excluded.
-- Implement the targeted page 93 allocation-series adapter behind an explicit `source_kind=CHART` path.
+- Normalize multi-level headers into complete column paths using the common repair pipeline.
+- Reconstruct a contiguous dense table region when sparse trailing columns contain chart contamination.
+- Emit token-verified percentage series through an explicit `source_kind=CHART` path when a no-table page contains a compact 100% distribution.
 - Persist parse warnings; never silently switch parser strategy.
 
 Gate: expected labels, values, units, dates, and footnotes match the inspected pages.
@@ -125,8 +125,8 @@ Gate: the UI exposes raw and semantic content, exact source page, table/row iden
 
 ## 6. Acceptance criteria
 
-- Page 70 and page 91 target tables parse with exact row/column semantics.
-- Page 93 is clearly identified as a chart and either passes its targeted adapter or reports an explicit unsupported/failed state.
+- Page 70 and page 91 target tables parse with exact row/column semantics through the generic pipeline.
+- Page 93 is clearly identified as a chart and either passes generic token verification or reports an explicit unsupported/failed state.
 - Every logical table row has comparable raw and semantic variants.
 - The three table representations can be tested independently with identical retrieval settings.
 - The correct target is in the top 3 for each supported golden query, with failures retained in the report.
@@ -137,6 +137,6 @@ Gate: the UI exposes raw and semantic content, exact source page, table/row iden
 
 - English financial reports only.
 - Native-text PDFs only; no general OCR path in the first implementation.
-- Conventional two-dimensional tables plus the one targeted page 93 chart layout.
+- Conventional two-dimensional tables plus compact percentage-distribution charts that satisfy the generic candidate rules.
 - No claim of general chart extraction, cross-document analytics, or production scale.
 - PostgreSQL `simple` full-text search does not provide useful Chinese segmentation. Chinese golden queries therefore primarily test multilingual embeddings and reranking unless optional query rewrite is explicitly enabled and reported.

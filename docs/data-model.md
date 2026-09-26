@@ -226,7 +226,7 @@ Metadata is descriptive and filterable but does not replace `content`.
 {
   "element_type": "TABLE_ROW",
   "source_kind": "TABLE",
-  "table_id": "p91_corporate_bonds_geography",
+  "table_id": "p91_t1",
   "table_title": "Corporate Bonds by Geography",
   "table_context": {
     "portfolio": "Non-par and Surplus Assets",
@@ -236,7 +236,7 @@ Metadata is descriptive and filterable but does not replace `content`.
   "row_label": "United States",
   "is_total": false,
   "source_bbox": [34.9, 138.7, 365.8, 252.9],
-  "extraction_method": "pdfplumber.lines",
+  "extraction_method": "pdfplumber.lines.generic",
   "parse_warnings": []
 }
 ```
@@ -331,7 +331,7 @@ As at 30 Nov 2010, risk discount rate: 10.00%; long-term 10-year government bond
 As at 31 Dec 2025, risk discount rate: 8.30%; long-term 10-year government bond rate: 2.70%; risk premium: 5.60%.
 ```
 
-Page 93 targeted chart-series example:
+Page 93 generic token-verified chart-series example:
 
 ```text
 Chart: AIA China Prudent Investment Portfolio.
@@ -342,7 +342,7 @@ Share of invested assets: 5%.
 Note: Includes less than 1% in loans and deposits.
 ```
 
-The first two examples use `chunk_type=TABLE_ROW`; the page 93 adapter uses `chunk_type=CHART_SERIES`. Both use `representation=SEMANTIC_ROW` so the same experimental arm can retrieve self-contained structured records while retaining `source_kind` in metadata.
+The first two examples use `chunk_type=TABLE_ROW`; the generic page 93 chart fallback uses `chunk_type=CHART_SERIES`. Both use `representation=SEMANTIC_ROW` so the same experimental arm can retrieve self-contained structured records while retaining `source_kind` in metadata.
 
 ### 5.4 Semantic labels
 

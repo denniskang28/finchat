@@ -5,6 +5,7 @@ import re
 from pdfplumber.page import Page
 
 from app.ingestion.repair_providers import (
+    ChartExtractionProposal,
     TableReconstructionProposal,
     TableRepairProvider,
 )
@@ -192,6 +193,8 @@ def _repair_split_rows(table: ParsedTable) -> list[TableRepair]:
         row = table.rows[position]
         if row.raw_cells[0] or not previous.raw_cells[0]:
             continue
+        if any(value and len(value) > 120 for value in row.raw_cells):
+            continue
         previous_columns = {
             index for index, value in enumerate(previous.raw_cells[1:], start=1) if value
         }
@@ -283,7 +286,15 @@ def _reconstruction_candidate(
     table: ParsedTable, issues: list[TableIssue]
 ) -> ParsedTable | None:
     issue_codes = {issue.code for issue in issues}
-    if not {"MISSING_ROW_LABEL", "OVERSIZED_CELL"}.issubset(issue_codes):
+    has_sparse_trailing_text = any(
+        row.raw_cells
+        and not row.raw_cells[0]
+        and any(value and len(value) > 40 for value in row.raw_cells[2:])
+        for row in table.rows
+    )
+    if not {"MISSING_ROW_LABEL", "SPLIT_ROW"}.intersection(issue_codes) or not (
+        "OVERSIZED_CELL" in issue_codes or has_sparse_trailing_text
+    ):
         return None
     if len(table.columns) < 4:
         return None
@@ -392,15 +403,26 @@ def _apply_llm_reconstruction(
         ):
             return None
         used_token_ids.update(value.source_token_ids)
-        return source_text, selected
+        return source_text.replace("\u2013", "-").replace("\u2014", "-"), selected
 
     header_values: list[tuple[str, list[SourceToken]]] = []
     for index, proposed in enumerate(proposal.columns):
-        verified = evidence(proposed)
+        source_column = candidate.columns[index]
+        is_inferred_row_label = (
+            source_column.is_row_label and not source_column.source_labels
+        )
+        if (
+            is_inferred_row_label
+            and proposed.value == "Row label"
+            and not proposed.source_token_ids
+        ):
+            verified = ("Row label", [])
+        else:
+            verified = evidence(proposed)
         if verified is None:
             return None
-        if not candidate.columns[index].label.startswith("Column ") and (
-            _normalized(candidate.columns[index].label) != _normalized(verified[0])
+        if not is_inferred_row_label and not source_column.label.startswith("Column ") and (
+            _normalized(source_column.label) != _normalized(verified[0])
         ):
             return None
         header_values.append(verified)
@@ -441,16 +463,30 @@ def _apply_llm_reconstruction(
         column.label = label
         column.semantic_label = label
         column.source_labels = [label]
+        if "%" in label:
+            column.unit = "%"
+            column.value_type = "PERCENT"
+        elif "$b" in label:
+            column.unit = "USD billion"
+            column.value_type = "CURRENCY"
         column.is_row_label = index == 0
         column.metadata = {
-            "source_x_range": [
-                min(token.bbox[0] for token in selected),
-                max(token.bbox[2] for token in selected),
-            ],
-            "header_y_range": [
-                min(token.bbox[1] for token in selected),
-                max(token.bbox[3] for token in selected),
-            ],
+            "source_x_range": (
+                [
+                    min(token.bbox[0] for token in selected),
+                    max(token.bbox[2] for token in selected),
+                ]
+                if selected
+                else source_column.metadata.get("source_x_range")
+            ),
+            "header_y_range": (
+                [
+                    min(token.bbox[1] for token in selected),
+                    max(token.bbox[3] for token in selected),
+                ]
+                if selected
+                else source_column.metadata.get("header_y_range")
+            ),
             "source_token_ids": proposal.columns[index].source_token_ids,
         }
         columns.append(column)
@@ -507,6 +543,122 @@ def _apply_llm_reconstruction(
             token.token_id for token in tokens if token.token_id in used_token_ids
         ],
         reason=proposal.reason or "Reconstructed the contiguous dense table region.",
+        confidence=proposal.confidence,
+    )
+    return reconstructed, repair
+
+
+def _apply_llm_chart_extraction(
+    *,
+    candidate: ParsedTable,
+    proposal: ChartExtractionProposal,
+    provider: TableRepairProvider,
+    tokens: list[SourceToken],
+) -> tuple[ParsedTable, TableRepair] | None:
+    if len(proposal.rows) != len(candidate.rows):
+        return None
+    token_map = {token.token_id: token for token in tokens}
+    expected_shares = {
+        str(row.metadata.get("share_token_id")): str(row.raw_cells[1])
+        for row in candidate.rows
+    }
+    used_token_ids: set[str] = set()
+    used_share_ids: set[str] = set()
+    used_labels: set[str] = set()
+
+    def evidence(value: object) -> tuple[str, list[SourceToken]] | None:
+        if not value.source_token_ids or any(
+            token_id not in token_map or token_id in used_token_ids
+            for token_id in value.source_token_ids
+        ):
+            return None
+        selected = _reading_order(
+            [token_map[token_id] for token_id in value.source_token_ids]
+        )
+        source_text = " ".join(token.text for token in selected)
+        if _normalized(source_text) != _normalized(value.value):
+            return None
+        used_token_ids.update(value.source_token_ids)
+        return source_text.replace("\u2013", "-").replace("\u2014", "-"), selected
+
+    verified_rows: list[tuple[str, str, list[SourceToken]]] = []
+    for proposed in proposal.rows:
+        if len(proposed.share.source_token_ids) != 1:
+            return None
+        share_token_id = proposed.share.source_token_ids[0]
+        if share_token_id not in expected_shares or share_token_id in used_share_ids:
+            return None
+        label = evidence(proposed.label)
+        share = evidence(proposed.share)
+        if label is None or share is None:
+            return None
+        if _normalized(share[0]) != _normalized(expected_shares[share_token_id]):
+            return None
+        if not re.search(r"[A-Za-z]", label[0]) or len(label[0]) > 120:
+            return None
+        normalized_label = _normalized(label[0])
+        if normalized_label in used_labels:
+            return None
+        label_x = sum((token.bbox[0] + token.bbox[2]) / 2 for token in label[1]) / len(label[1])
+        label_y = sum((token.bbox[1] + token.bbox[3]) / 2 for token in label[1]) / len(label[1])
+        share_x = (share[1][0].bbox[0] + share[1][0].bbox[2]) / 2
+        share_y = (share[1][0].bbox[1] + share[1][0].bbox[3]) / 2
+        if ((label_x - share_x) ** 2 + (label_y - share_y) ** 2) ** 0.5 > 160:
+            return None
+        used_share_ids.add(share_token_id)
+        used_labels.add(normalized_label)
+        verified_rows.append(
+            (
+                label[0].replace("\u2013", "-").replace("\u2014", "-"),
+                share[0],
+                [*label[1], *share[1]],
+            )
+        )
+    if used_share_ids != set(expected_shares):
+        return None
+
+    columns = [column.model_copy(deep=True) for column in candidate.columns]
+    rows: list[ParsedRow] = []
+    for row_index, (label, share, row_tokens) in enumerate(verified_rows, start=1):
+        values = {columns[0].key: label, columns[1].key: share}
+        rows.append(
+            ParsedRow(
+                row_index=row_index,
+                row_label=re.sub(r"\(\d+\)", "", label).strip(),
+                values=values,
+                display_values=values.copy(),
+                raw_cells=[label, share],
+                footnote_markers=re.findall(r"\((\d+)\)", label),
+                metadata={
+                    "source_row_bbox": [
+                        min(token.bbox[0] for token in row_tokens),
+                        min(token.bbox[1] for token in row_tokens),
+                        max(token.bbox[2] for token in row_tokens),
+                        max(token.bbox[3] for token in row_tokens),
+                    ],
+                    "source_token_ids": [token.token_id for token in row_tokens],
+                },
+            )
+        )
+    reconstructed = candidate.model_copy(deep=True)
+    reconstructed.rows = rows
+    reconstructed.extraction_method = "pdfplumber.positioned_text+llm.chart_series"
+    reconstructed.parse_warnings = [
+        "LLM associated chart labels and shares; every value was verified against PDF tokens and geometry."
+    ]
+    repair = TableRepair(
+        operation="RECONSTRUCT_TABLE",
+        source="LLM",
+        provider=provider.name,
+        model=provider.model,
+        row_index=0,
+        column_index=0,
+        original_value=f"percentage chart candidate x {len(candidate.rows)} rows",
+        repaired_value=f"2 columns x {len(rows)} rows",
+        source_token_ids=[
+            token.token_id for token in tokens if token.token_id in used_token_ids
+        ],
+        reason=proposal.reason or "Associated percentage chart labels with their shares.",
         confidence=proposal.confidence,
     )
     return reconstructed, repair
@@ -763,16 +915,48 @@ class TableRepairPipeline:
         canonical = raw_table.model_copy(deep=True)
         tokens = extract_source_tokens(page, raw_table)
         initial_issues = detect_table_issues(raw_table)
-        repairs = _repair_split_rows(canonical)
-        repairs.extend(_repair_missing_labels(canonical, tokens))
-        remaining = detect_table_issues(canonical)
-        reconstruction_candidate = _reconstruction_candidate(canonical, remaining)
+        repairs: list[TableRepair] = []
+        extraction_failures: list[TableIssue] = []
+        is_chart_candidate = (
+            raw_table.extraction_method
+            == "pdfplumber.positioned_text.percentage_chart_candidate"
+        )
+        if is_chart_candidate and self.provider.available:
+            try:
+                proposal = self.provider.propose_chart_extraction(
+                    table=raw_table,
+                    issues=initial_issues,
+                    tokens=tokens,
+                    image_data_url=_render_table_image(page, raw_table),
+                )
+                if proposal is not None:
+                    result = _apply_llm_chart_extraction(
+                        candidate=raw_table,
+                        proposal=proposal,
+                        provider=self.provider,
+                        tokens=tokens,
+                    )
+                    if result is not None:
+                        canonical, chart_repair = result
+                        repairs.append(chart_repair)
+            except Exception as exc:
+                extraction_failures.append(
+                    TableIssue(
+                        code="LLM_CHART_EXTRACTION_FAILED",
+                        severity="LOW",
+                        message=(
+                            f"{self.provider.name} chart extraction request failed: "
+                            f"{type(exc).__name__}"
+                        ),
+                    )
+                )
+        reconstruction_candidate = _reconstruction_candidate(canonical, initial_issues)
         if reconstruction_candidate is not None and self.provider.available:
             reconstruction_tokens = extract_source_tokens(page, reconstruction_candidate)
             try:
                 proposal = self.provider.propose_reconstruction(
                     table=reconstruction_candidate,
-                    issues=remaining,
+                    issues=initial_issues,
                     tokens=reconstruction_tokens,
                     image_data_url=_render_table_image(page, reconstruction_candidate),
                 )
@@ -787,9 +971,8 @@ class TableRepairPipeline:
                     if result is not None:
                         canonical, reconstruction_repair = result
                         repairs.append(reconstruction_repair)
-                        remaining = detect_table_issues(canonical)
             except Exception as exc:
-                remaining.append(
+                extraction_failures.append(
                     TableIssue(
                         code="LLM_RECONSTRUCTION_FAILED",
                         severity="LOW",
@@ -799,6 +982,9 @@ class TableRepairPipeline:
                         ),
                     )
                 )
+        repairs.extend(_repair_split_rows(canonical))
+        repairs.extend(_repair_missing_labels(canonical, tokens))
+        remaining = [*detect_table_issues(canonical), *extraction_failures]
         repairable_codes = {
             "MISSING_ROW_LABEL",
             "PLACEHOLDER_HEADER",
@@ -807,7 +993,7 @@ class TableRepairPipeline:
             "HEADER_ROW_AS_DATA",
         }
         repairable_issues = [issue for issue in remaining if issue.code in repairable_codes]
-        if repairable_issues and self.provider.available:
+        if repairable_issues and self.provider.available and not is_chart_candidate:
             try:
                 proposals = self.provider.propose_repairs(
                     table=canonical,

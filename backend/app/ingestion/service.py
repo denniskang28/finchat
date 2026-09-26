@@ -6,7 +6,7 @@ from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.ingestion.parser import AiaPdfParser
+from app.ingestion.parser import PdfParser
 from app.ingestion.repair_providers import create_table_repair_provider
 from app.ingestion.renderers import build_table_debug
 from app.ingestion.table_quality import TableRepairPipeline
@@ -17,7 +17,7 @@ class IngestionService:
     def __init__(self) -> None:
         self.settings = get_settings()
         provider = create_table_repair_provider(self.settings)
-        self.parser = AiaPdfParser(TableRepairPipeline(provider))
+        self.parser = PdfParser(TableRepairPipeline(provider))
 
     async def ingest(self, upload: UploadFile, session: AsyncSession) -> Document:
         filename = Path(upload.filename or "document.pdf").name

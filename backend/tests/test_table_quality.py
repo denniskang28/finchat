@@ -277,7 +277,7 @@ def test_page_94_split_total_cell_is_merged_into_previous_row(sample_pdf):
     ]
     assert len(artifact.canonical_table.rows) == len(raw_table.rows) - 1
     assert artifact.repairs[0].operation == "MERGE_SPLIT_ROW"
-    assert artifact.quality.status == "NEEDS_REVIEW"
+    assert artifact.quality.status == "REPAIRED"
 
 
 def _synthetic_multilevel_header_table() -> ParsedTable:
