@@ -69,6 +69,7 @@ class TableRepair(BaseModel):
         "DELETE_EMPTY_COLUMN",
         "TRIM_CONTAMINATED_CELL",
         "REASSIGN_TOKEN",
+        "RECONSTRUCT_TABLE",
     ] = "REPLACE_CELL"
     source: Literal["DETERMINISTIC", "LLM"]
     provider: str | None = None

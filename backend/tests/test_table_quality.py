@@ -6,8 +6,10 @@ from app.ingestion.parser import AiaPdfParser
 from app.ingestion.repair_providers import (
     CellRepairProposal,
     DisabledTableRepairProvider,
+    EvidenceValue,
     OpenAICompatibleVisionProvider,
     RepairProposalResponse,
+    TableReconstructionProposal,
     TableRepairProvider,
 )
 from app.ingestion.renderers import build_table_debug
@@ -105,6 +107,111 @@ def test_ambiguous_missing_labels_are_not_auto_repaired(sample_pdf):
                 issue.code == expected_issue
                 for issue in artifact.quality.remaining_issues
             )
+
+
+class _Page86ReconstructionProvider(TableRepairProvider):
+    name = "fake"
+    model = "fake-vision"
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def propose_repairs(self, **_):
+        return RepairProposalResponse()
+
+    def propose_reconstruction(self, *, table, **_):
+        token_ids = [
+            (["p86w25", "p86w26", "p86w27", "p86w28", "p86w29"], ["p86w30"]),
+            (["p86w38", "p86w39"], ["p86w40"]),
+            (["p86w56", "p86w57"], ["p86w58"]),
+            (["p86w65", "p86w66", "p86w67"], ["p86w68"]),
+            (["p86w69", "p86w70"], ["p86w71"]),
+            (
+                [
+                    "p86w72", "p86w73", "p86w74", "p86w75",
+                    "p86w76", "p86w77", "p86w78", "p86w79",
+                ],
+                ["p86w80"],
+            ),
+            (["p86w94", "p86w95"], ["p86w96"]),
+            (["p86w97"], ["p86w98"]),
+            (["p86w104", "p86w105"], ["p86w106"]),
+            (["p86w115"], ["p86w116"]),
+            (["p86w125", "p86w126", "p86w127"], ["p86w128"]),
+            (["p86w145", "p86w146", "p86w147", "p86w148", "p86w149"], ["p86w150"]),
+        ]
+        return TableReconstructionProposal(
+            columns=[
+                EvidenceValue(value="($b)", source_token_ids=["p86w16"]),
+                EvidenceValue(
+                    value="Non-par and Surplus Assets",
+                    source_token_ids=["p86w8", "p86w13", "p86w14", "p86w17"],
+                ),
+            ],
+            rows=[
+                [
+                    EvidenceValue(value=row.raw_cells[0], source_token_ids=ids[0]),
+                    EvidenceValue(value=row.raw_cells[1], source_token_ids=ids[1]),
+                ]
+                for row, ids in zip(table.rows, token_ids, strict=True)
+            ],
+            reason="The right-side chart was joined to a dense two-column table.",
+            confidence=0.99,
+        )
+
+
+def test_page_86_llm_reconstructs_only_dense_token_verified_table(sample_pdf):
+    parser = AiaPdfParser()
+    pipeline = TableRepairPipeline(_Page86ReconstructionProvider())
+    with pdfplumber.open(sample_pdf) as pdf:
+        page = pdf.pages[85]
+        raw_table = parser.parse_page(page, 86, uuid.uuid4())[0]
+        artifact = pipeline.process(page, raw_table)
+
+    assert len(raw_table.columns) == 5
+    assert len(raw_table.rows) == 13
+    assert artifact.quality.status == "REPAIRED"
+    assert artifact.quality.remaining_issues == []
+    assert [column.label for column in artifact.canonical_table.columns] == [
+        "($b)",
+        "Non-par and Surplus Assets",
+    ]
+    assert len(artifact.canonical_table.rows) == 12
+    assert artifact.canonical_table.rows[-2].raw_cells == [
+        "Total Invested Assets",
+        "149.1",
+    ]
+    assert artifact.canonical_table.rows[-1].raw_cells == [
+        "% of Total Invested Assets",
+        "52%",
+    ]
+    assert artifact.repairs[-1].operation == "RECONSTRUCT_TABLE"
+    assert len(artifact.repairs[-1].source_token_ids) == 53
+    assert artifact.canonical_table.bbox[2] < raw_table.bbox[2]
+
+
+class _InventedValueReconstructionProvider(_Page86ReconstructionProvider):
+    def propose_reconstruction(self, **kwargs):
+        proposal = super().propose_reconstruction(**kwargs)
+        proposal.rows[-1][1].value = "53%"
+        return proposal
+
+
+def test_page_86_reconstruction_rejects_an_llm_changed_number(sample_pdf):
+    parser = AiaPdfParser()
+    pipeline = TableRepairPipeline(_InventedValueReconstructionProvider())
+    with pdfplumber.open(sample_pdf) as pdf:
+        page = pdf.pages[85]
+        raw_table = parser.parse_page(page, 86, uuid.uuid4())[0]
+        artifact = pipeline.process(page, raw_table)
+
+    assert artifact.quality.status == "NEEDS_REVIEW"
+    assert all(repair.operation != "RECONSTRUCT_TABLE" for repair in artifact.repairs)
+    assert len(artifact.canonical_table.columns) == 5
+    assert any(
+        issue.code == "OVERSIZED_CELL" for issue in artifact.quality.remaining_issues
+    )
 
 
 class _EvidenceBackedFakeProvider(TableRepairProvider):

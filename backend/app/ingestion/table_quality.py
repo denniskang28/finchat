@@ -4,8 +4,13 @@ import re
 
 from pdfplumber.page import Page
 
-from app.ingestion.repair_providers import TableRepairProvider
+from app.ingestion.repair_providers import (
+    TableReconstructionProposal,
+    TableRepairProvider,
+)
 from app.schemas import (
+    ParsedColumn,
+    ParsedRow,
     ParsedTable,
     ParsedTableArtifact,
     SourceToken,
@@ -274,6 +279,239 @@ def _render_table_image(page: Page, table: ParsedTable) -> str:
     return f"data:image/png;base64,{base64.b64encode(stream.getvalue()).decode('ascii')}"
 
 
+def _reconstruction_candidate(
+    table: ParsedTable, issues: list[TableIssue]
+) -> ParsedTable | None:
+    issue_codes = {issue.code for issue in issues}
+    if not {"MISSING_ROW_LABEL", "OVERSIZED_CELL"}.issubset(issue_codes):
+        return None
+    if len(table.columns) < 4:
+        return None
+
+    labelled_rows = [row for row in table.rows if row.raw_cells and row.raw_cells[0]]
+    if len(labelled_rows) < 4:
+        return None
+    dense_threshold = max(4, int(len(labelled_rows) * 0.6))
+    occupancies = [
+        sum(
+            1
+            for row in labelled_rows
+            if column_index < len(row.raw_cells) and row.raw_cells[column_index]
+        )
+        for column_index in range(len(table.columns))
+    ]
+    dense_width = 0
+    for occupancy in occupancies:
+        if occupancy < dense_threshold:
+            break
+        dense_width += 1
+    if dense_width < 2 or dense_width >= len(table.columns):
+        return None
+    if any(
+        occupancy > max(1, int(len(labelled_rows) * 0.2))
+        for occupancy in occupancies[dense_width:]
+    ):
+        return None
+
+    selected_columns = [column.model_copy(deep=True) for column in table.columns[:dense_width]]
+    x_ranges = [column.metadata.get("source_x_range") for column in selected_columns]
+    if any(not x_range for x_range in x_ranges):
+        return None
+    crop_x1 = max(float(x_range[1]) for x_range in x_ranges if x_range)
+    table_width = float(table.bbox[2]) - float(table.bbox[0])
+    crop_width = crop_x1 - float(table.bbox[0])
+    if crop_width >= table_width * 0.95:
+        return None
+
+    rows: list[ParsedRow] = []
+    for source in labelled_rows:
+        cells = source.raw_cells[:dense_width]
+        if len(cells) != dense_width or any(value is None for value in cells):
+            return None
+        values = {
+            column.key: cells[index] for index, column in enumerate(selected_columns)
+        }
+        row = source.model_copy(deep=True)
+        row.row_index = len(rows) + 1
+        row.raw_cells = cells
+        row.values = values
+        row.display_values = values.copy()
+        rows.append(row)
+
+    candidate = table.model_copy(deep=True)
+    candidate.bbox = (table.bbox[0], table.bbox[1], crop_x1, table.bbox[3])
+    candidate.columns = selected_columns
+    candidate.rows = rows
+    return candidate
+
+
+def _reconstruction_key(value: str, index: int, used: set[str]) -> str:
+    key = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or f"column_{index + 1}"
+    if key in used:
+        key = f"{key}_{index + 1}"
+    used.add(key)
+    return key
+
+
+def _apply_llm_reconstruction(
+    *,
+    original: ParsedTable,
+    candidate: ParsedTable,
+    proposal: TableReconstructionProposal,
+    provider: TableRepairProvider,
+    tokens: list[SourceToken],
+) -> tuple[ParsedTable, TableRepair] | None:
+    width = len(candidate.columns)
+    if len(proposal.columns) != width or len(proposal.rows) != len(candidate.rows):
+        return None
+    if any(len(row) != width for row in proposal.rows):
+        return None
+
+    token_map = {token.token_id: token for token in tokens}
+    used_token_ids: set[str] = set()
+
+    def evidence(value: object) -> tuple[str, list[SourceToken]] | None:
+        if not value.source_token_ids or any(
+            token_id not in token_map or token_id in used_token_ids
+            for token_id in value.source_token_ids
+        ):
+            return None
+        selected = _reading_order(
+            [token_map[token_id] for token_id in value.source_token_ids]
+        )
+        source_text = " ".join(token.text for token in selected)
+        if _normalized(source_text) != _normalized(value.value):
+            return None
+        x0, y0, x1, y1 = candidate.bbox
+        if any(
+            not (
+                x0 <= (token.bbox[0] + token.bbox[2]) / 2 <= x1
+                and y0 <= (token.bbox[1] + token.bbox[3]) / 2 <= y1
+            )
+            for token in selected
+        ):
+            return None
+        used_token_ids.update(value.source_token_ids)
+        return source_text, selected
+
+    header_values: list[tuple[str, list[SourceToken]]] = []
+    for index, proposed in enumerate(proposal.columns):
+        verified = evidence(proposed)
+        if verified is None:
+            return None
+        if not candidate.columns[index].label.startswith("Column ") and (
+            _normalized(candidate.columns[index].label) != _normalized(verified[0])
+        ):
+            return None
+        header_values.append(verified)
+
+    verified_rows: list[list[tuple[str, list[SourceToken]]]] = []
+    previous_y = float("-inf")
+    for row_index, proposed_row in enumerate(proposal.rows):
+        verified_row: list[tuple[str, list[SourceToken]]] = []
+        x_centers: list[float] = []
+        y_centers: list[float] = []
+        for column_index, proposed in enumerate(proposed_row):
+            verified = evidence(proposed)
+            expected = candidate.rows[row_index].raw_cells[column_index]
+            if verified is None or _normalized(verified[0]) != _normalized(expected or ""):
+                return None
+            verified_row.append(verified)
+            x_centers.append(
+                sum((token.bbox[0] + token.bbox[2]) / 2 for token in verified[1])
+                / len(verified[1])
+            )
+            y_centers.extend((token.bbox[1] + token.bbox[3]) / 2 for token in verified[1])
+        if any(left >= right for left, right in zip(x_centers, x_centers[1:])):
+            return None
+        if max(y_centers) - min(y_centers) > 20:
+            return None
+        row_y = sum(y_centers) / len(y_centers)
+        if row_y <= previous_y:
+            return None
+        previous_y = row_y
+        verified_rows.append(verified_row)
+
+    used_keys: set[str] = set()
+    columns: list[ParsedColumn] = []
+    for index, (label, selected) in enumerate(header_values):
+        source_column = candidate.columns[index]
+        column = source_column.model_copy(deep=True)
+        column.key = _reconstruction_key(label, index, used_keys)
+        column.label = label
+        column.semantic_label = label
+        column.source_labels = [label]
+        column.is_row_label = index == 0
+        column.metadata = {
+            "source_x_range": [
+                min(token.bbox[0] for token in selected),
+                max(token.bbox[2] for token in selected),
+            ],
+            "header_y_range": [
+                min(token.bbox[1] for token in selected),
+                max(token.bbox[3] for token in selected),
+            ],
+            "source_token_ids": proposal.columns[index].source_token_ids,
+        }
+        columns.append(column)
+
+    rows: list[ParsedRow] = []
+    for row_index, verified_row in enumerate(verified_rows, start=1):
+        raw_cells = [value for value, _ in verified_row]
+        values = {column.key: raw_cells[index] for index, column in enumerate(columns)}
+        row_tokens = [token for _, selected in verified_row for token in selected]
+        row_label = raw_cells[0]
+        rows.append(
+            ParsedRow(
+                row_index=row_index,
+                row_label=re.sub(r"\(\d+\)", "", row_label).strip(),
+                values=values,
+                display_values=values.copy(),
+                raw_cells=raw_cells,
+                is_total=row_label.lower().startswith(("total", "weighted average")),
+                footnote_markers=re.findall(r"\((\d+)\)", row_label),
+                metadata={
+                    "source_row_bbox": [
+                        min(token.bbox[0] for token in row_tokens),
+                        min(token.bbox[1] for token in row_tokens),
+                        max(token.bbox[2] for token in row_tokens),
+                        max(token.bbox[3] for token in row_tokens),
+                    ],
+                    "source_token_ids": [
+                        token_id
+                        for cell in proposal.rows[row_index - 1]
+                        for token_id in cell.source_token_ids
+                    ],
+                },
+            )
+        )
+
+    reconstructed = candidate.model_copy(deep=True)
+    reconstructed.columns = columns
+    reconstructed.rows = rows
+    reconstructed.extraction_method = f"{original.extraction_method}+llm.reconstructed"
+    reconstructed.parse_warnings = [
+        *original.parse_warnings,
+        "LLM reconstructed a dense table region; every header and cell was verified against PDF tokens and geometry.",
+    ]
+    repair = TableRepair(
+        operation="RECONSTRUCT_TABLE",
+        source="LLM",
+        provider=provider.name,
+        model=provider.model,
+        row_index=0,
+        column_index=0,
+        original_value=f"{len(original.columns)} columns x {len(original.rows)} rows",
+        repaired_value=f"{len(columns)} columns x {len(rows)} rows",
+        source_token_ids=[
+            token.token_id for token in tokens if token.token_id in used_token_ids
+        ],
+        reason=proposal.reason or "Reconstructed the contiguous dense table region.",
+        confidence=proposal.confidence,
+    )
+    return reconstructed, repair
+
+
 def _apply_llm_repairs(
     *,
     table: ParsedTable,
@@ -528,6 +766,39 @@ class TableRepairPipeline:
         repairs = _repair_split_rows(canonical)
         repairs.extend(_repair_missing_labels(canonical, tokens))
         remaining = detect_table_issues(canonical)
+        reconstruction_candidate = _reconstruction_candidate(canonical, remaining)
+        if reconstruction_candidate is not None and self.provider.available:
+            reconstruction_tokens = extract_source_tokens(page, reconstruction_candidate)
+            try:
+                proposal = self.provider.propose_reconstruction(
+                    table=reconstruction_candidate,
+                    issues=remaining,
+                    tokens=reconstruction_tokens,
+                    image_data_url=_render_table_image(page, reconstruction_candidate),
+                )
+                if proposal is not None:
+                    result = _apply_llm_reconstruction(
+                        original=canonical,
+                        candidate=reconstruction_candidate,
+                        proposal=proposal,
+                        provider=self.provider,
+                        tokens=reconstruction_tokens,
+                    )
+                    if result is not None:
+                        canonical, reconstruction_repair = result
+                        repairs.append(reconstruction_repair)
+                        remaining = detect_table_issues(canonical)
+            except Exception as exc:
+                remaining.append(
+                    TableIssue(
+                        code="LLM_RECONSTRUCTION_FAILED",
+                        severity="LOW",
+                        message=(
+                            f"{self.provider.name} reconstruction request failed: "
+                            f"{type(exc).__name__}"
+                        ),
+                    )
+                )
         repairable_codes = {
             "MISSING_ROW_LABEL",
             "PLACEHOLDER_HEADER",

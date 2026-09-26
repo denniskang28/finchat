@@ -34,6 +34,18 @@ class RepairProposalResponse(BaseModel):
     repairs: list[CellRepairProposal] = Field(default_factory=list)
 
 
+class EvidenceValue(BaseModel):
+    value: str
+    source_token_ids: list[str] = Field(min_length=1)
+
+
+class TableReconstructionProposal(BaseModel):
+    columns: list[EvidenceValue] = Field(min_length=2)
+    rows: list[list[EvidenceValue]] = Field(min_length=4)
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class TableRepairProvider(ABC):
     name: str
     model: str
@@ -53,6 +65,16 @@ class TableRepairProvider(ABC):
         image_data_url: str,
     ) -> RepairProposalResponse:
         raise NotImplementedError
+
+    def propose_reconstruction(
+        self,
+        *,
+        table: ParsedTable,
+        issues: list[TableIssue],
+        tokens: list[SourceToken],
+        image_data_url: str,
+    ) -> TableReconstructionProposal | None:
+        return None
 
 
 class DisabledTableRepairProvider(TableRepairProvider):
@@ -193,6 +215,81 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
             except ValidationError:
                 continue
         return RepairProposalResponse(repairs=valid_repairs)
+
+    def propose_reconstruction(
+        self,
+        *,
+        table: ParsedTable,
+        issues: list[TableIssue],
+        tokens: list[SourceToken],
+        image_data_url: str,
+    ) -> TableReconstructionProposal | None:
+        prompt = {
+            "task": "Reconstruct only the financial table inside the supplied crop.",
+            "constraints": [
+                "Return JSON only.",
+                f"Return exactly {len(table.columns)} columns and {len(table.rows)} rows.",
+                "Preserve every supplied dense row in the same order.",
+                "Every header and cell must include the exact source_token_ids that spell its value.",
+                "Preserve source text, footnote markers, and numeric values exactly.",
+                "Do not include chart labels or narrative outside the cropped table.",
+                "Return null when the crop is ambiguous.",
+            ],
+            "segmentation_hint": {
+                "bbox": table.bbox,
+                "columns": [column.label for column in table.columns],
+                "dense_rows": [row.raw_cells for row in table.rows],
+            },
+            "issues": [issue.model_dump(mode="json") for issue in issues],
+            "source_tokens": [token.model_dump(mode="json") for token in tokens],
+            "response_shape": {
+                "columns": [
+                    {"value": "Exact header", "source_token_ids": ["p1w1"]}
+                ],
+                "rows": [
+                    [
+                        {"value": "Exact cell", "source_token_ids": ["p1w2"]}
+                    ]
+                ],
+                "reason": "Short evidence-based explanation",
+                "confidence": 0.99,
+            },
+        }
+        response = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={
+                "model": self.model,
+                "temperature": 0,
+                "enable_thinking": False,
+                "max_tokens": 5000,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You reconstruct financial tables using only supplied visual and PDF token evidence.",
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                            {"type": "text", "text": json.dumps(prompt, ensure_ascii=False)},
+                        ],
+                    },
+                ],
+            },
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "") for item in content if isinstance(item, dict)
+            )
+        match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, flags=re.DOTALL)
+        payload = json.loads(match.group(1) if match else content)
+        if payload is None:
+            return None
+        return TableReconstructionProposal.model_validate(payload)
 
 
 def create_table_repair_provider(settings: Settings) -> TableRepairProvider:

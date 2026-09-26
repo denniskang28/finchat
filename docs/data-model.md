@@ -77,7 +77,8 @@ class TableIssue(BaseModel):
 class TableRepair(BaseModel):
     operation: Literal[
         "REPLACE_CELL", "MERGE_SPLIT_ROW", "REPLACE_HEADER", "MERGE_HEADER",
-        "DELETE_EMPTY_COLUMN", "TRIM_CONTAMINATED_CELL", "REASSIGN_TOKEN"
+        "DELETE_EMPTY_COLUMN", "TRIM_CONTAMINATED_CELL", "REASSIGN_TOKEN",
+        "RECONSTRUCT_TABLE"
     ]
     source: Literal["DETERMINISTIC", "LLM"]
     provider: str | None
