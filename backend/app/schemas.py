@@ -134,3 +134,28 @@ class UploadResponse(DocumentSummary):
 class PageText(BaseModel):
     page_number: int
     text: str
+
+
+class ChunkSummary(BaseModel):
+    id: UUID
+    page_number: int
+    chunk_type: str
+    representation: str
+    comparison_key: str | None
+    content_preview: str
+    created_at: datetime
+
+
+class ChunkDetail(BaseModel):
+    id: UUID
+    document_id: UUID
+    page_number: int
+    chunk_type: str
+    representation: str
+    comparison_key: str | None
+    content: str
+    raw_content: str | None
+    semantic_content: str | None
+    metadata: dict[str, Any]
+    embedding_dimensions: int | None
+    created_at: datetime

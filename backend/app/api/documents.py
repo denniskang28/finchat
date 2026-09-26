@@ -7,7 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.ingestion.service import IngestionService
 from app.models import Chunk, Document
-from app.schemas import DocumentSummary, PageText, TableDebug, UploadResponse
+from app.schemas import (
+    ChunkDetail,
+    ChunkSummary,
+    DocumentSummary,
+    PageText,
+    TableDebug,
+    UploadResponse,
+)
 
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -87,3 +94,64 @@ async def list_pages(
         for chunk in result.scalars()
     ]
 
+
+@router.get("/{document_id}/chunks", response_model=list[ChunkSummary])
+async def list_chunks(
+    document_id: UUID, session: AsyncSession = Depends(get_session)
+) -> list[dict]:
+    await _get_document(document_id, session)
+    result = await session.execute(
+        select(Chunk)
+        .where(Chunk.document_id == document_id)
+        .order_by(
+            Chunk.page_number,
+            Chunk.chunk_type,
+            Chunk.representation,
+            Chunk.comparison_key,
+            Chunk.created_at,
+        )
+    )
+    return [
+        {
+            "id": chunk.id,
+            "page_number": chunk.page_number,
+            "chunk_type": chunk.chunk_type,
+            "representation": chunk.representation,
+            "comparison_key": chunk.comparison_key,
+            "content_preview": " ".join(chunk.content.split())[:240],
+            "created_at": chunk.created_at,
+        }
+        for chunk in result.scalars()
+    ]
+
+
+@router.get("/{document_id}/chunks/{chunk_id}", response_model=ChunkDetail)
+async def get_chunk(
+    document_id: UUID,
+    chunk_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    await _get_document(document_id, session)
+    result = await session.execute(
+        select(Chunk).where(
+            Chunk.id == chunk_id,
+            Chunk.document_id == document_id,
+        )
+    )
+    chunk = result.scalar_one_or_none()
+    if chunk is None:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    return {
+        "id": chunk.id,
+        "document_id": chunk.document_id,
+        "page_number": chunk.page_number,
+        "chunk_type": chunk.chunk_type,
+        "representation": chunk.representation,
+        "comparison_key": chunk.comparison_key,
+        "content": chunk.content,
+        "raw_content": chunk.raw_content,
+        "semantic_content": chunk.semantic_content,
+        "metadata": chunk.metadata_json,
+        "embedding_dimensions": len(chunk.embedding) if chunk.embedding is not None else None,
+        "created_at": chunk.created_at,
+    }
