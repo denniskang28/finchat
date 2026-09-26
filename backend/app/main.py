@@ -48,3 +48,22 @@ async def health() -> dict[str, object]:
             "llm_available": provider.available,
         },
     }
+
+
+@app.get("/api/providers")
+async def providers() -> list[dict[str, object]]:
+    default_provider = settings.table_repair_provider.strip().lower()
+    return [
+        {
+            "id": provider_name,
+            "name": display_name,
+            "model": provider.model,
+            "available": provider.available,
+            "default": provider_name == default_provider,
+        }
+        for provider_name, display_name in (
+            ("alibaba", "Alibaba Cloud / Qwen"),
+            ("deepseek", "DeepSeek"),
+        )
+        for provider in [create_table_repair_provider(settings, provider_name)]
+    ]

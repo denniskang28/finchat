@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,10 +34,12 @@ def _document_response(document: Document) -> dict:
 
 @router.post("", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document(
-    file: UploadFile = File(...), session: AsyncSession = Depends(get_session)
+    file: UploadFile = File(...),
+    provider: str | None = Form(None),
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
     try:
-        document = await IngestionService().ingest(file, session)
+        document = await IngestionService(provider_name=provider).ingest(file, session)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

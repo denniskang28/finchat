@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from pathlib import Path
 
@@ -14,12 +15,14 @@ from app.models import Chunk, Document
 
 
 class IngestionService:
-    def __init__(self) -> None:
+    def __init__(self, provider_name: str | None = None) -> None:
         self.settings = get_settings()
-        provider = create_table_repair_provider(self.settings)
+        self.provider = create_table_repair_provider(self.settings, provider_name)
+        if provider_name is not None and not self.provider.available:
+            raise ValueError(f"Provider '{provider_name}' is not configured with an API key.")
         self.parser = PdfParser(
             TableRepairPipeline(
-                provider,
+                self.provider,
                 llm_primary=self.settings.table_parse_mode == "llm_primary",
             ),
             page_workers=self.settings.table_parse_workers,
@@ -50,7 +53,9 @@ class IngestionService:
         await session.commit()
 
         try:
+            parse_started_at = time.perf_counter()
             pages, tables = await asyncio.to_thread(self.parser.parse, stored_path, document_id)
+            parse_duration_seconds = time.perf_counter() - parse_started_at
             for page_number, page_text in enumerate(pages, start=1):
                 session.add(
                     Chunk(
@@ -164,20 +169,22 @@ class IngestionService:
                 "table_repairs": repair_count,
                 "repaired_tables": repaired_table_count,
                 "needs_review_tables": review_table_count,
-                "table_repair_provider": self.settings.table_repair_provider,
+                "table_repair_provider": self.provider.name,
+                "table_repair_model": self.provider.model,
+                "parse_duration_seconds": round(parse_duration_seconds, 3),
                 "table_parse_mode": self.settings.table_parse_mode,
                 "table_parse_workers": self.settings.table_parse_workers,
                 "llm_primary_attempted_pages": (
                     len(pages)
                     if self.settings.table_parse_mode == "llm_primary"
-                    and create_table_repair_provider(self.settings).available
+                    and self.provider.available
                     else 0
                 ),
                 "llm_primary_structures": llm_primary_structure_count,
                 "llm_primary_structure_pages": sorted(llm_primary_pages),
                 "fallback_structures": fallback_structure_count,
                 "fallback_structure_pages": sorted(fallback_pages),
-                "llm_repair_available": create_table_repair_provider(self.settings).available,
+                "llm_repair_available": self.provider.available,
             }
             await session.commit()
             await session.refresh(document)

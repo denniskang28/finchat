@@ -537,3 +537,23 @@ def test_provider_uses_compact_non_thinking_prompt_and_skips_invalid_proposals(m
     assert captured["max_tokens"] == 3000
     assert len(response.repairs) == 1
     assert response.repairs[0].operation == "DELETE_EMPTY_COLUMN"
+
+
+def test_deepseek_request_uses_provider_specific_non_thinking_json_mode():
+    provider = OpenAICompatibleVisionProvider(
+        name="deepseek",
+        api_key="not-a-real-key",
+        base_url="https://api.deepseek.com",
+        model="deepseek-flash",
+        timeout_seconds=1,
+        request_options={
+            "thinking": {"type": "disabled"},
+            "response_format": {"type": "json_object"},
+        },
+    )
+
+    body = provider._request_body(max_tokens=12000, messages=[])
+
+    assert body["thinking"] == {"type": "disabled"}
+    assert body["response_format"] == {"type": "json_object"}
+    assert "enable_thinking" not in body

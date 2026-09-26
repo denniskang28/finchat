@@ -4,7 +4,9 @@ import {
   AlertTriangle,
   Boxes,
   CheckCircle2,
+  Clock3,
   Copy,
+  Cpu,
   Database,
   FileText,
   LoaderCircle,
@@ -19,6 +21,12 @@ import {
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+function formatDuration(seconds) {
+  if (seconds == null) return null;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+}
 
 async function api(path, options) {
   const response = await fetch(`${API_URL}${path}`, options);
@@ -389,6 +397,8 @@ function ChunkExplorer({ chunks, selectedChunkId, onSelect, detail, loading }) {
 function App() {
   const inputRef = useRef(null);
   const [documents, setDocuments] = useState([]);
+  const [providers, setProviders] = useState([]);
+  const [selectedProvider, setSelectedProvider] = useState("");
   const [selectedId, setSelectedId] = useState(null);
   const [tables, setTables] = useState([]);
   const [chunks, setChunks] = useState([]);
@@ -428,6 +438,17 @@ function App() {
     return nextId;
   }
 
+  async function loadProviders() {
+    const result = await api("/api/providers");
+    setProviders(result);
+    setSelectedProvider((current) => {
+      if (result.some((provider) => provider.id === current && provider.available)) return current;
+      return result.find((provider) => provider.default && provider.available)?.id
+        || result.find((provider) => provider.available)?.id
+        || "";
+    });
+  }
+
   async function loadTables(documentId) {
     if (!documentId) {
       setTables([]);
@@ -454,7 +475,7 @@ function App() {
   }
 
   useEffect(() => {
-    loadDocuments().catch((err) => setError(err.message));
+    Promise.all([loadDocuments(), loadProviders()]).catch((err) => setError(err.message));
   }, []);
 
   useEffect(() => {
@@ -479,6 +500,7 @@ function App() {
     setError("");
     const body = new FormData();
     body.append("file", file);
+    if (selectedProvider) body.append("provider", selectedProvider);
     try {
       const document = await api("/api/documents", { method: "POST", body });
       await loadDocuments(document.id);
@@ -502,6 +524,18 @@ function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          <label className="provider-picker">
+            <Cpu size={15} />
+            <span>Parser</span>
+            <select value={selectedProvider} onChange={(event) => setSelectedProvider(event.target.value)}>
+              {providers.length === 0 && <option value="">Loading models</option>}
+              {providers.map((provider) => (
+                <option key={provider.id} value={provider.id} disabled={!provider.available}>
+                  {provider.name} · {provider.model}{provider.available ? "" : " · key required"}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             className="icon-button"
             title="Refresh documents"
@@ -545,6 +579,12 @@ function App() {
                 <span>
                   <strong>{document.filename}</strong>
                   <small>{document.page_count ?? 0} pages · {document.metadata.tables ?? 0} tables</small>
+                  {document.metadata.table_repair_model && (
+                    <small className="document-run">
+                      {document.metadata.table_repair_model}
+                      {document.metadata.parse_duration_seconds != null && ` · ${formatDuration(document.metadata.parse_duration_seconds)}`}
+                    </small>
+                  )}
                 </span>
               </button>
             ))}
@@ -568,7 +608,15 @@ function App() {
                 <div>
                   <div className="eyebrow">Parsed document</div>
                   <h2>{selected.filename}</h2>
-                  <StatusBadge status={selected.status} />
+                  <div className="document-status-line">
+                    <StatusBadge status={selected.status} />
+                    {selected.metadata.table_repair_model && (
+                      <span><Cpu size={13} /> {selected.metadata.table_repair_provider} · {selected.metadata.table_repair_model}</span>
+                    )}
+                    {selected.metadata.parse_duration_seconds != null && (
+                      <span><Clock3 size={13} /> {formatDuration(selected.metadata.parse_duration_seconds)}</span>
+                    )}
+                  </div>
                 </div>
                 <div className="metrics">
                   <Metric label="Pages" value={selected.page_count} active={viewMode === "tables" && tableFilter === "pages"} onClick={() => applyTableFilter("pages")} title="Show tables from all parsed pages" />

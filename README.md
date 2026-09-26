@@ -23,7 +23,7 @@ docker compose up --build
 - API documentation: http://localhost:8000/docs
 - Health check: http://localhost:8000/api/health
 
-Upload a PDF in the UI. Parsing is synchronous for this POC; the AIA 2025 report remains the golden validation sample.
+Upload a PDF in the UI and choose either Qwen or DeepSeek. Parsing is synchronous for this POC; the AIA 2025 report remains the golden validation sample. Each document records the provider, model, and wall-clock parsing duration so equivalent uploads can be compared.
 
 ## Table repair provider
 
@@ -39,7 +39,15 @@ ALIBABA_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ALIBABA_VISION_MODEL=qwen3.8-flash
 ```
 
-An empty API key is valid: deterministic repairs still run and LLM escalation is skipped. To use another OpenAI-compatible multimodal service later, set `TABLE_REPAIR_PROVIDER=openai_compatible` and configure the corresponding `OPENAI_COMPATIBLE_*` variables. The health endpoint reports provider availability without exposing credentials.
+DeepSeek's OpenAI-compatible multimodal endpoint is also supported:
+
+```dotenv
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_VISION_MODEL=deepseek-flash
+```
+
+An empty API key is valid for the default provider: deterministic repairs still run and LLM escalation is skipped. Providers selected explicitly in the upload UI must have an API key. The provider endpoint reports availability without exposing credentials.
 
 ## Test
 

@@ -170,12 +170,26 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
         base_url: str,
         model: str,
         timeout_seconds: float,
+        request_options: dict | None = None,
     ) -> None:
         self.name = name
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.request_options = (
+            {"enable_thinking": False} if request_options is None else request_options
+        )
+
+    def _request_body(self, *, max_tokens: int, messages: list[dict]) -> dict:
+        body = {
+            "model": self.model,
+            "temperature": 0,
+            "max_tokens": max_tokens,
+            "messages": messages,
+        }
+        body.update(self.request_options)
+        return body
 
     @property
     def available(self) -> bool:
@@ -251,12 +265,9 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
         response = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": self.model,
-                "temperature": 0,
-                "enable_thinking": False,
-                "max_tokens": 3000,
-                "messages": [
+            json=self._request_body(
+                max_tokens=3000,
+                messages=[
                     {
                         "role": "system",
                         "content": "You repair financial table structure using only supplied visual and token evidence.",
@@ -269,7 +280,7 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
                         ],
                     },
                 ],
-            },
+            ),
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
@@ -358,12 +369,9 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
         response = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": self.model,
-                "temperature": 0,
-                "enable_thinking": False,
-                "max_tokens": 12000,
-                "messages": [
+            json=self._request_body(
+                max_tokens=12000,
+                messages=[
                     {
                         "role": "system",
                         "content": (
@@ -379,7 +387,7 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
                         ],
                     },
                 ],
-            },
+            ),
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
@@ -441,12 +449,9 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
         response = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": self.model,
-                "temperature": 0,
-                "enable_thinking": False,
-                "max_tokens": 5000,
-                "messages": [
+            json=self._request_body(
+                max_tokens=5000,
+                messages=[
                     {
                         "role": "system",
                         "content": "You reconstruct financial tables using only supplied visual and PDF token evidence.",
@@ -459,7 +464,7 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
                         ],
                     },
                 ],
-            },
+            ),
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
@@ -522,12 +527,9 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
         response = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": self.model,
-                "temperature": 0,
-                "enable_thinking": False,
-                "max_tokens": 3000,
-                "messages": [
+            json=self._request_body(
+                max_tokens=3000,
+                messages=[
                     {
                         "role": "system",
                         "content": "You extract chart series using only supplied visual and PDF token evidence.",
@@ -540,7 +542,7 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
                         ],
                     },
                 ],
-            },
+            ),
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
@@ -572,10 +574,12 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
         )
 
 
-def create_table_repair_provider(settings: Settings) -> TableRepairProvider:
+def create_table_repair_provider(
+    settings: Settings, provider_name: str | None = None
+) -> TableRepairProvider:
     if not settings.table_repair_enabled:
         return DisabledTableRepairProvider()
-    provider = settings.table_repair_provider.strip().lower()
+    provider = (provider_name or settings.table_repair_provider).strip().lower()
     if provider == "alibaba":
         return OpenAICompatibleVisionProvider(
             name="alibaba",
@@ -583,6 +587,18 @@ def create_table_repair_provider(settings: Settings) -> TableRepairProvider:
             base_url=settings.alibaba_base_url,
             model=settings.alibaba_vision_model,
             timeout_seconds=settings.table_repair_timeout_seconds,
+        )
+    if provider == "deepseek":
+        return OpenAICompatibleVisionProvider(
+            name="deepseek",
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            model=settings.deepseek_vision_model,
+            timeout_seconds=settings.table_repair_timeout_seconds,
+            request_options={
+                "thinking": {"type": "disabled"},
+                "response_format": {"type": "json_object"},
+            },
         )
     if provider == "openai_compatible":
         return OpenAICompatibleVisionProvider(
@@ -592,4 +608,4 @@ def create_table_repair_provider(settings: Settings) -> TableRepairProvider:
             model=settings.openai_compatible_vision_model,
             timeout_seconds=settings.table_repair_timeout_seconds,
         )
-    raise ValueError(f"Unsupported TABLE_REPAIR_PROVIDER: {settings.table_repair_provider}")
+    raise ValueError(f"Unsupported table repair provider: {provider}")
