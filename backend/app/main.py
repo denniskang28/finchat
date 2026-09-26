@@ -41,6 +41,8 @@ async def health() -> dict[str, object]:
         "scope": "ingestion-and-table-debug",
         "table_repair": {
             "enabled": settings.table_repair_enabled,
+            "parse_mode": settings.table_parse_mode,
+            "page_workers": settings.table_parse_workers,
             "provider": provider.name,
             "model": provider.model,
             "llm_available": provider.available,

@@ -1,6 +1,7 @@
 import re
 import uuid
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from itertools import combinations
 from pathlib import Path
 
@@ -32,25 +33,73 @@ def _pad(row: Iterable[object], width: int) -> list[str | None]:
 
 
 class PdfParser:
-    def __init__(self, repair_pipeline: TableRepairPipeline | None = None) -> None:
+    def __init__(
+        self,
+        repair_pipeline: TableRepairPipeline | None = None,
+        *,
+        page_workers: int = 1,
+    ) -> None:
         self.repair_pipeline = repair_pipeline
+        self.page_workers = max(1, page_workers)
 
     def parse(
         self, pdf_path: Path, document_id: uuid.UUID
     ) -> tuple[list[str], list[ParsedTableArtifact]]:
+        use_parallel = bool(
+            self.page_workers > 1
+            and self.repair_pipeline
+            and self.repair_pipeline.llm_primary
+            and self.repair_pipeline.provider.available
+        )
+        if use_parallel:
+            with pdfplumber.open(pdf_path) as pdf:
+                page_count = len(pdf.pages)
+
+            def parse_one(page_number: int) -> tuple[str, list[ParsedTableArtifact]]:
+                with pdfplumber.open(pdf_path) as worker_pdf:
+                    page = worker_pdf.pages[page_number - 1]
+                    page_text = page.extract_text(layout=True) or ""
+                    raw_tables = self.parse_page(page, page_number, document_id, page_text)
+                    artifacts = self.repair_pipeline.process_page(
+                        page=page,
+                        raw_tables=raw_tables,
+                        document_id=document_id,
+                        page_number=page_number,
+                        page_title=self._page_title(page_text),
+                        footnotes=self._note_lines(page_text),
+                    )
+                    return page_text.strip(), artifacts
+
+            with ThreadPoolExecutor(max_workers=self.page_workers) as executor:
+                results = list(executor.map(parse_one, range(1, page_count + 1)))
+            return (
+                [page_text for page_text, _ in results],
+                [artifact for _, artifacts in results for artifact in artifacts],
+            )
+
         pages: list[str] = []
         parsed_tables: list[ParsedTableArtifact] = []
         with pdfplumber.open(pdf_path) as pdf:
             for page_number, page in enumerate(pdf.pages, start=1):
                 page_text = page.extract_text(layout=True) or ""
                 pages.append(page_text.strip())
-                for table in self.parse_page(page, page_number, document_id, page_text):
-                    if self.repair_pipeline:
-                        parsed_tables.append(self.repair_pipeline.process(page, table))
-                    else:
-                        parsed_tables.append(
-                            ParsedTableArtifact(raw_table=table, canonical_table=table)
+                raw_tables = self.parse_page(page, page_number, document_id, page_text)
+                if self.repair_pipeline:
+                    parsed_tables.extend(
+                        self.repair_pipeline.process_page(
+                            page=page,
+                            raw_tables=raw_tables,
+                            document_id=document_id,
+                            page_number=page_number,
+                            page_title=self._page_title(page_text),
+                            footnotes=self._note_lines(page_text),
                         )
+                    )
+                else:
+                    parsed_tables.extend(
+                        ParsedTableArtifact(raw_table=table, canonical_table=table)
+                        for table in raw_tables
+                    )
         return pages, parsed_tables
 
     def parse_page(

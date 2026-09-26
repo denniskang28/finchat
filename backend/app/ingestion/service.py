@@ -17,7 +17,13 @@ class IngestionService:
     def __init__(self) -> None:
         self.settings = get_settings()
         provider = create_table_repair_provider(self.settings)
-        self.parser = PdfParser(TableRepairPipeline(provider))
+        self.parser = PdfParser(
+            TableRepairPipeline(
+                provider,
+                llm_primary=self.settings.table_parse_mode == "llm_primary",
+            ),
+            page_workers=self.settings.table_parse_workers,
+        )
 
     async def ingest(self, upload: UploadFile, session: AsyncSession) -> Document:
         filename = Path(upload.filename or "document.pdf").name
@@ -65,8 +71,21 @@ class IngestionService:
             repaired_table_count = 0
             review_table_count = 0
             repair_count = 0
+            llm_primary_pages: set[int] = set()
+            fallback_pages: set[int] = set()
+            llm_primary_structure_count = 0
+            fallback_structure_count = 0
             for artifact in tables:
                 table = artifact.canonical_table
+                if table.extraction_method.startswith("llm.page_structure"):
+                    llm_primary_structure_count += 1
+                    llm_primary_pages.add(table.page_number)
+                if any(
+                    warning.startswith("LLM-primary fallback:")
+                    for warning in table.parse_warnings
+                ):
+                    fallback_structure_count += 1
+                    fallback_pages.add(table.page_number)
                 debug = build_table_debug(artifact)
                 warning_count += len(table.parse_warnings) + len(artifact.quality.remaining_issues)
                 repair_count += len(artifact.repairs)
@@ -146,6 +165,18 @@ class IngestionService:
                 "repaired_tables": repaired_table_count,
                 "needs_review_tables": review_table_count,
                 "table_repair_provider": self.settings.table_repair_provider,
+                "table_parse_mode": self.settings.table_parse_mode,
+                "table_parse_workers": self.settings.table_parse_workers,
+                "llm_primary_attempted_pages": (
+                    len(pages)
+                    if self.settings.table_parse_mode == "llm_primary"
+                    and create_table_repair_provider(self.settings).available
+                    else 0
+                ),
+                "llm_primary_structures": llm_primary_structure_count,
+                "llm_primary_structure_pages": sorted(llm_primary_pages),
+                "fallback_structures": fallback_structure_count,
+                "fallback_structure_pages": sorted(fallback_pages),
                 "llm_repair_available": create_table_repair_provider(self.settings).available,
             }
             await session.commit()

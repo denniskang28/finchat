@@ -1,11 +1,14 @@
 import base64
 import io
 import re
+from threading import Lock
 
 from pdfplumber.page import Page
 
 from app.ingestion.repair_providers import (
     ChartExtractionProposal,
+    EvidenceValue,
+    PageStructureProposal,
     TableReconstructionProposal,
     TableRepairProvider,
 )
@@ -19,6 +22,9 @@ from app.schemas import (
     TableQuality,
     TableRepair,
 )
+
+
+_PDF_RENDER_LOCK = Lock()
 
 
 def _normalized(value: str) -> str:
@@ -276,10 +282,302 @@ def _repair_missing_labels(
 
 
 def _render_table_image(page: Page, table: ParsedTable) -> str:
-    image = page.crop(table.bbox).to_image(resolution=150, antialias=True).original
+    with _PDF_RENDER_LOCK:
+        image = page.crop(table.bbox).to_image(resolution=150, antialias=True).original
     stream = io.BytesIO()
     image.save(stream, format="PNG")
     return f"data:image/png;base64,{base64.b64encode(stream.getvalue()).decode('ascii')}"
+
+
+def extract_page_tokens(page: Page, page_number: int) -> list[SourceToken]:
+    return [
+        SourceToken(
+            token_id=f"p{page_number}w{index}",
+            text=str(word["text"]),
+            bbox=(
+                float(word["x0"]),
+                float(word["top"]),
+                float(word["x1"]),
+                float(word["bottom"]),
+            ),
+        )
+        for index, word in enumerate(
+            page.extract_words(x_tolerance=2, y_tolerance=2, keep_blank_chars=False),
+            start=1,
+        )
+    ]
+
+
+def _render_page_image(page: Page) -> str:
+    with _PDF_RENDER_LOCK:
+        image = page.to_image(resolution=150, antialias=True).original
+    stream = io.BytesIO()
+    image.save(stream, format="PNG")
+    return f"data:image/png;base64,{base64.b64encode(stream.getvalue()).decode('ascii')}"
+
+
+def _exact_text(value: str) -> str:
+    return re.sub(r"\s+", "", value.replace("\u2013", "-").replace("\u2014", "-")).casefold()
+
+
+def _unit_name(value: str) -> str | None:
+    compact = _exact_text(value).strip("()")
+    if compact in {"$b", "us$b", "usd$b", "bn", "us$bn"}:
+        return "USD billion"
+    if compact in {"$m", "us$m", "usd$m", "mn", "us$mn"}:
+        return "USD million"
+    if compact == "%":
+        return "%"
+    return None
+
+
+def _normalize_unit_rows(proposal: PageStructureProposal) -> PageStructureProposal:
+    normalized = proposal.model_copy(deep=True)
+    kept_rows: list[list[EvidenceValue]] = []
+    for row in normalized.rows:
+        populated = [(index, cell) for index, cell in enumerate(row) if cell.value.strip()]
+        if len(populated) != 1 or _unit_name(populated[0][1].value) is None:
+            kept_rows.append(row)
+            continue
+        unit_cell = populated[0][1]
+        target = next(
+            (column for column in normalized.columns if not column.is_row_label),
+            normalized.columns[-1],
+        )
+        if target.unit is None:
+            target.unit = unit_cell
+        elif _exact_text(target.unit.value) != _exact_text(unit_cell.value):
+            kept_rows.append(row)
+    normalized.rows = kept_rows
+    return normalized
+
+
+def _validated_page_structure(
+    *,
+    proposal: PageStructureProposal,
+    tokens: list[SourceToken],
+    document_id: object,
+    page_number: int,
+    table_id: str,
+    default_title: str,
+    footnotes: list[str],
+) -> ParsedTable:
+    proposal = _normalize_unit_rows(proposal)
+    width = len(proposal.columns)
+    if not proposal.rows:
+        raise ValueError("structure has no data rows after unit normalization")
+    if any(len(row) != width for row in proposal.rows):
+        raise ValueError("row width does not match the proposed columns")
+    row_label_columns = [index for index, column in enumerate(proposal.columns) if column.is_row_label]
+    if len(row_label_columns) > 1:
+        raise ValueError("more than one row-label column was proposed")
+    row_label_index = row_label_columns[0] if row_label_columns else 0
+
+    token_map = {token.token_id: token for token in tokens}
+    used_cell_token_ids: set[str] = set()
+    geometry_tokens: list[SourceToken] = []
+
+    def evidence(
+        value: EvidenceValue,
+        *,
+        allow_empty: bool = False,
+        allow_inferred: bool = False,
+        allow_structural_normalization: bool = False,
+        allow_unit_equivalence: bool = False,
+        reserve: bool = True,
+    ) -> tuple[str | None, list[SourceToken]]:
+        if not value.value.strip():
+            if value.source_token_ids or not allow_empty:
+                raise ValueError("empty values must have no token ids")
+            return None, []
+        if not value.source_token_ids:
+            inferred_labels = {"Row label", "Category"}
+            if proposal.source_kind == "CHART":
+                inferred_labels.update({"Percentage", "Share", "Share of total", "Value"})
+            if allow_inferred and value.value in inferred_labels:
+                return value.value, []
+            raise ValueError(f"value has no source evidence: {value.value}")
+        if len(set(value.source_token_ids)) != len(value.source_token_ids):
+            raise ValueError(f"value repeats source token ids: {value.value}")
+        if any(token_id not in token_map for token_id in value.source_token_ids):
+            raise ValueError(f"value cites an unknown source token: {value.value}")
+        if reserve and any(token_id in used_cell_token_ids for token_id in value.source_token_ids):
+            raise ValueError(f"source token is reused across cells: {value.value}")
+        selected = _reading_order([token_map[token_id] for token_id in value.source_token_ids])
+        source_text = " ".join(token.text for token in selected)
+        exact_match = _exact_text(source_text) == _exact_text(value.value)
+        inferred_chart_label = bool(
+            allow_inferred
+            and proposal.source_kind == "CHART"
+            and _exact_text(source_text) == f"by{_exact_text(value.value)}"
+        )
+        structurally_equivalent = bool(
+            allow_structural_normalization
+            and _normalized(source_text) == _normalized(value.value)
+        )
+        equivalent_unit = bool(
+            allow_unit_equivalence
+            and _unit_name(source_text) is not None
+            and _unit_name(source_text) == _unit_name(value.value)
+        )
+        if not exact_match and not inferred_chart_label and not structurally_equivalent and not equivalent_unit:
+            raise ValueError(f"value differs from source tokens: {value.value}")
+        if reserve:
+            used_cell_token_ids.update(value.source_token_ids)
+            geometry_tokens.extend(selected)
+        verified_value = value.value if inferred_chart_label else source_text
+        return verified_value.replace("\u2013", "-").replace("\u2014", "-"), selected
+
+    title = default_title
+    if proposal.title is not None:
+        title_value, _ = evidence(proposal.title, reserve=False)
+        title = title_value or default_title
+
+    used_keys: set[str] = set()
+    columns: list[ParsedColumn] = []
+    for index, proposed_column in enumerate(proposal.columns):
+        label_proposal = proposed_column.label
+        if proposal.source_kind == "CHART" and not label_proposal.source_token_ids:
+            column_values = [row[index].value for row in proposal.rows if index < len(row)]
+            inferred_label = (
+                "Category"
+                if index == row_label_index
+                else "Percentage"
+                if column_values and all(not value or value.endswith("%") for value in column_values)
+                else "Value"
+            )
+            label_proposal = EvidenceValue(value=inferred_label)
+        label, label_tokens = evidence(
+            label_proposal,
+            allow_inferred=index == row_label_index or proposal.source_kind == "CHART",
+            allow_structural_normalization=True,
+            reserve=False,
+        )
+        if label is None:
+            raise ValueError("column label cannot be empty")
+        unit = None
+        unit_tokens: list[SourceToken] = []
+        if proposed_column.unit is not None:
+            inferred_percent_unit = bool(
+                proposal.source_kind == "CHART"
+                and proposed_column.unit.value == "%"
+                and all(
+                    index < len(row)
+                    and (not row[index].value or row[index].value.endswith("%"))
+                    for row in proposal.rows
+                )
+            )
+            if inferred_percent_unit:
+                raw_unit = "%"
+            else:
+                raw_unit, unit_tokens = evidence(
+                    proposed_column.unit,
+                    allow_unit_equivalence=True,
+                    reserve=False,
+                )
+            unit = _unit_name(raw_unit or "")
+            if unit is None:
+                raise ValueError(f"unsupported or ambiguous unit: {raw_unit}")
+        key = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") or f"column_{index + 1}"
+        if key in used_keys:
+            key = f"{key}_{index + 1}"
+        used_keys.add(key)
+        all_header_tokens = [*label_tokens, *unit_tokens]
+        metadata = {"source_token_ids": [token.token_id for token in all_header_tokens]}
+        if all_header_tokens:
+            metadata["source_x_range"] = [
+                min(token.bbox[0] for token in all_header_tokens),
+                max(token.bbox[2] for token in all_header_tokens),
+            ]
+            metadata["header_y_range"] = [
+                min(token.bbox[1] for token in all_header_tokens),
+                max(token.bbox[3] for token in all_header_tokens),
+            ]
+        value_type = proposed_column.value_type
+        if unit == "%":
+            value_type = "PERCENT"
+        elif unit in {"USD billion", "USD million"}:
+            value_type = "CURRENCY"
+        columns.append(
+            ParsedColumn(
+                key=key,
+                source_labels=[label] if label_tokens else [],
+                label=label,
+                semantic_label=label,
+                unit=unit,
+                value_type=value_type,
+                is_row_label=index == row_label_index,
+                metadata=metadata,
+            )
+        )
+
+    rows: list[ParsedRow] = []
+    for row_index, proposed_row in enumerate(proposal.rows, start=1):
+        verified = [evidence(cell, allow_empty=True) for cell in proposed_row]
+        raw_cells = [value for value, _ in verified]
+        row_label_value = raw_cells[row_label_index]
+        if not row_label_value:
+            raise ValueError(f"row {row_index} has no row label")
+        row_tokens = [token for _, selected in verified for token in selected]
+        values = {column.key: raw_cells[index] for index, column in enumerate(columns)}
+        rows.append(
+            ParsedRow(
+                row_index=row_index,
+                row_label=re.sub(r"\((\d+)\)", "", row_label_value).strip(),
+                values=values,
+                display_values=values.copy(),
+                raw_cells=raw_cells,
+                is_total=row_label_value.lower().startswith(("total", "weighted average")),
+                footnote_markers=re.findall(r"\((\d+)\)", row_label_value),
+                metadata={
+                    "source_row_bbox": [
+                        min(token.bbox[0] for token in row_tokens),
+                        min(token.bbox[1] for token in row_tokens),
+                        max(token.bbox[2] for token in row_tokens),
+                        max(token.bbox[3] for token in row_tokens),
+                    ],
+                    "source_token_ids": [token.token_id for token in row_tokens],
+                },
+            )
+        )
+
+    context_values = []
+    for context_value in proposal.context:
+        value, _ = evidence(context_value, reserve=False)
+        if value:
+            context_values.append(value)
+    if not geometry_tokens:
+        raise ValueError("structure has no token-backed geometry")
+    padding = 4.0
+    bbox = (
+        max(0.0, min(token.bbox[0] for token in geometry_tokens) - padding),
+        max(0.0, min(token.bbox[1] for token in geometry_tokens) - padding),
+        max(token.bbox[2] for token in geometry_tokens) + padding,
+        max(token.bbox[3] for token in geometry_tokens) + padding,
+    )
+    return ParsedTable(
+        table_id=table_id,
+        document_id=document_id,
+        page_number=page_number,
+        bbox=bbox,
+        source_kind=proposal.source_kind,
+        title=title,
+        context={"related_context": " | ".join(context_values)} if context_values else {},
+        columns=columns,
+        rows=rows,
+        footnotes=footnotes,
+        extraction_method="llm.page_structure+pdfplumber.token_verified",
+    )
+
+
+def _bbox_overlap(left: ParsedTable, right: ParsedTable) -> float:
+    x0 = max(left.bbox[0], right.bbox[0])
+    y0 = max(left.bbox[1], right.bbox[1])
+    x1 = min(left.bbox[2], right.bbox[2])
+    y1 = min(left.bbox[3], right.bbox[3])
+    intersection = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    area = max(1.0, (left.bbox[2] - left.bbox[0]) * (left.bbox[3] - left.bbox[1]))
+    return intersection / area
 
 
 def _reconstruction_candidate(
@@ -908,8 +1206,116 @@ def _apply_llm_repairs(
 
 
 class TableRepairPipeline:
-    def __init__(self, provider: TableRepairProvider) -> None:
+    def __init__(self, provider: TableRepairProvider, *, llm_primary: bool = False) -> None:
         self.provider = provider
+        self.llm_primary = llm_primary
+
+    def process_page(
+        self,
+        *,
+        page: Page,
+        raw_tables: list[ParsedTable],
+        document_id: object,
+        page_number: int,
+        page_title: str,
+        footnotes: list[str],
+    ) -> list[ParsedTableArtifact]:
+        if not self.llm_primary or not self.provider.available:
+            return [self.process(page, table) for table in raw_tables]
+
+        tokens = extract_page_tokens(page, page_number)
+        failure_messages: list[str] = []
+        try:
+            response = self.provider.propose_page_structures(
+                page_number=page_number,
+                page_width=float(page.width),
+                page_height=float(page.height),
+                tokens=tokens,
+                image_data_url=_render_page_image(page),
+            )
+        except Exception as exc:
+            response = None
+            failure_messages.append(f"provider request failed: {type(exc).__name__}")
+
+        validated: list[tuple[ParsedTable, float]] = []
+        if response is not None:
+            kind_counts = {"TABLE": 0, "CHART": 0}
+            for index, proposal in enumerate(response.structures, start=1):
+                kind_counts[proposal.source_kind] += 1
+                suffix = "t" if proposal.source_kind == "TABLE" else "chart"
+                table_id = f"p{page_number}_{suffix}{kind_counts[proposal.source_kind]}"
+                try:
+                    table = _validated_page_structure(
+                        proposal=proposal,
+                        tokens=tokens,
+                        document_id=document_id,
+                        page_number=page_number,
+                        table_id=table_id,
+                        default_title=page_title,
+                        footnotes=footnotes,
+                    )
+                    validated.append((table, proposal.confidence))
+                except ValueError as exc:
+                    failure_messages.append(f"structure {index} rejected: {exc}")
+
+        unmatched_raw = set(range(len(raw_tables)))
+        artifacts: list[ParsedTableArtifact] = []
+        for canonical, confidence in validated:
+            matches = sorted(
+                (
+                    (_bbox_overlap(canonical, raw_tables[index]), index)
+                    for index in unmatched_raw
+                ),
+                reverse=True,
+            )
+            match_index = matches[0][1] if matches and matches[0][0] >= 0.25 else None
+            if match_index is None:
+                raw = canonical.model_copy(deep=True)
+            else:
+                unmatched_raw.remove(match_index)
+                raw = raw_tables[match_index]
+            artifacts.append(
+                ParsedTableArtifact(
+                    raw_table=raw,
+                    canonical_table=canonical,
+                    quality=TableQuality(
+                        status="PASS",
+                        confidence=confidence,
+                        initial_issues=detect_table_issues(raw) if match_index is not None else [],
+                        remaining_issues=[],
+                    ),
+                )
+            )
+
+        used_table_ids = {
+            artifact.canonical_table.table_id for artifact in artifacts
+        }
+        fallback_reason = "; ".join(failure_messages[:3])
+        if response is not None and not response.structures:
+            fallback_reason = "provider returned no page structures"
+        for index in sorted(unmatched_raw):
+            artifact = self.process(page, raw_tables[index])
+            if artifact.canonical_table.table_id in used_table_ids:
+                suffix = "chart" if artifact.canonical_table.source_kind == "CHART" else "t"
+                counter = 1
+                while f"p{page_number}_{suffix}{counter}" in used_table_ids:
+                    counter += 1
+                unique_id = f"p{page_number}_{suffix}{counter}"
+                artifact.raw_table.table_id = unique_id
+                artifact.canonical_table.table_id = unique_id
+            used_table_ids.add(artifact.canonical_table.table_id)
+            if fallback_reason:
+                artifact.canonical_table.parse_warnings.append(
+                    f"LLM-primary fallback: {fallback_reason}."
+                )
+            artifacts.append(artifact)
+        return sorted(
+            artifacts,
+            key=lambda artifact: (
+                artifact.canonical_table.bbox[1],
+                artifact.canonical_table.bbox[0],
+            ),
+        )
 
     def process(self, page: Page, raw_table: ParsedTable) -> ParsedTableArtifact:
         canonical = raw_table.model_copy(deep=True)

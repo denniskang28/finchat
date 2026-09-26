@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Literal
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.config import Settings
 from app.schemas import ParsedTable, SourceToken, TableIssue
@@ -57,6 +57,46 @@ class ChartExtractionProposal(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class PageColumnProposal(BaseModel):
+    label: EvidenceValue
+    unit: EvidenceValue | None = None
+    value_type: Literal["TEXT", "NUMBER", "PERCENT", "CURRENCY"] = "TEXT"
+    is_row_label: bool = False
+
+    @field_validator("value_type", mode="before")
+    @classmethod
+    def normalize_value_type(cls, value: object) -> object:
+        if isinstance(value, str) and value.upper() == "PERCENTAGE":
+            return "PERCENT"
+        return value
+
+    @field_validator("unit", mode="before")
+    @classmethod
+    def normalize_unit(cls, value: object) -> object:
+        if isinstance(value, str):
+            return {"value": value, "source_token_ids": []}
+        return value
+
+
+class PageStructureProposal(BaseModel):
+    source_kind: Literal["TABLE", "CHART"]
+    title: EvidenceValue | None = None
+    columns: list[PageColumnProposal] = Field(min_length=2)
+    rows: list[list[EvidenceValue]] = Field(min_length=1)
+    context: list[EvidenceValue] = Field(default_factory=list)
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("context", mode="before")
+    @classmethod
+    def normalize_context(cls, value: object) -> object:
+        return [] if value is None else value
+
+
+class PageStructureResponse(BaseModel):
+    structures: list[PageStructureProposal] = Field(default_factory=list)
+
+
 class TableRepairProvider(ABC):
     name: str
     model: str
@@ -95,6 +135,17 @@ class TableRepairProvider(ABC):
         tokens: list[SourceToken],
         image_data_url: str,
     ) -> ChartExtractionProposal | None:
+        return None
+
+    def propose_page_structures(
+        self,
+        *,
+        page_number: int,
+        page_width: float,
+        page_height: float,
+        tokens: list[SourceToken],
+        image_data_url: str,
+    ) -> PageStructureResponse | None:
         return None
 
 
@@ -236,6 +287,116 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
             except ValidationError:
                 continue
         return RepairProposalResponse(repairs=valid_repairs)
+
+    def propose_page_structures(
+        self,
+        *,
+        page_number: int,
+        page_width: float,
+        page_height: float,
+        tokens: list[SourceToken],
+        image_data_url: str,
+    ) -> PageStructureResponse | None:
+        prompt = {
+            "task": "Identify and reconstruct every financial table and data chart on this complete PDF page.",
+            "constraints": [
+                "Return JSON only with a top-level structures array; use an empty array when the page has no financial table or data chart.",
+                "Separate adjacent tables, charts, and narrative panels into distinct structures.",
+                "Do not turn prose-only callouts, footnotes, page numbers, or decorative content into rows.",
+                "Every visible title, header, unit, context note, and non-empty cell must cite the exact source_token_ids that spell it.",
+                "Preserve source text, signs, decimal points, parentheses, footnote markers, and numeric values exactly.",
+                "Use an empty value and no token ids for a genuinely empty cell.",
+                "The first column may use the inferred label 'Row label' or 'Category' without token ids when no visible header exists.",
+                "Put units such as ($b), %, or US$m in the column unit field; never return a unit as a data row.",
+                "For charts, return the visible series as rows and use source_kind CHART.",
+                "Context must be short, directly relevant evidence from the same page; omit unrelated narrative.",
+                "Do not infer, calculate, correct, or invent values that are not present in the supplied tokens.",
+            ],
+            "page": {
+                "page_number": page_number,
+                "width": page_width,
+                "height": page_height,
+            },
+            "source_tokens": [token.model_dump(mode="json") for token in tokens],
+            "response_shape": {
+                "structures": [
+                    {
+                        "source_kind": "TABLE",
+                        "title": {
+                            "value": "Exact visible title",
+                            "source_token_ids": ["p1w1"],
+                        },
+                        "columns": [
+                            {
+                                "label": {"value": "Row label", "source_token_ids": []},
+                                "unit": None,
+                                "value_type": "TEXT",
+                                "is_row_label": True,
+                            },
+                            {
+                                "label": {"value": "Exact header", "source_token_ids": ["p1w2"]},
+                                "unit": {"value": "($b)", "source_token_ids": ["p1w3"]},
+                                "value_type": "CURRENCY",
+                                "is_row_label": False,
+                            },
+                        ],
+                        "rows": [
+                            [
+                                {"value": "Exact row label", "source_token_ids": ["p1w4"]},
+                                {"value": "10.0", "source_token_ids": ["p1w5"]},
+                            ]
+                        ],
+                        "context": [
+                            {"value": "Exact related context", "source_token_ids": ["p1w6"]}
+                        ],
+                        "reason": "Short structural explanation",
+                        "confidence": 0.99,
+                    }
+                ]
+            },
+        }
+        response = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={
+                "model": self.model,
+                "temperature": 0,
+                "enable_thinking": False,
+                "max_tokens": 12000,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You parse financial-report pages into auditable structures. "
+                            "Use only supplied image and PDF token evidence."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                            {"type": "text", "text": json.dumps(prompt, ensure_ascii=False)},
+                        ],
+                    },
+                ],
+            },
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "") for item in content if isinstance(item, dict)
+            )
+        match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, flags=re.DOTALL)
+        payload = json.loads(match.group(1) if match else content)
+        structures = []
+        for candidate in payload.get("structures", []):
+            try:
+                structures.append(PageStructureProposal.model_validate(candidate))
+            except ValidationError:
+                continue
+        return PageStructureResponse(structures=structures)
 
     def propose_reconstruction(
         self,

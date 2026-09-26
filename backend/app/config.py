@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("data/uploads")
     cors_origins: str = "http://localhost:5173"
     table_repair_enabled: bool = True
+    table_parse_mode: str = "llm_primary"
+    table_parse_workers: int = 4
     table_repair_provider: str = "alibaba"
     table_repair_timeout_seconds: float = 90.0
     dashscope_api_key: str = ""
