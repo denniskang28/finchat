@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     table_repair_timeout_seconds: float = 90.0
     dashscope_api_key: str = ""
     alibaba_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    alibaba_vision_model: str = "qwen-vl-max-latest"
+    alibaba_vision_model: str = "qwen-vl-plus"
     openai_compatible_api_key: str = ""
     openai_compatible_base_url: str = ""
     openai_compatible_vision_model: str = ""
