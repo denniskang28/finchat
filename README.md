@@ -33,7 +33,7 @@ TABLE_REPAIR_ENABLED=true
 TABLE_REPAIR_PROVIDER=alibaba
 DASHSCOPE_API_KEY=
 ALIBABA_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-ALIBABA_VISION_MODEL=qwen-vl-plus
+ALIBABA_VISION_MODEL=qwen3.8-flash
 ```
 
 An empty API key is valid: deterministic repairs still run and LLM escalation is skipped. To use another OpenAI-compatible multimodal service later, set `TABLE_REPAIR_PROVIDER=openai_compatible` and configure the corresponding `OPENAI_COMPATIBLE_*` variables. The health endpoint reports provider availability without exposing credentials.

@@ -47,6 +47,13 @@ def detect_table_issues(table: ParsedTable) -> list[TableIssue]:
     for row_position, row in enumerate(table.rows):
         first_cell = row.raw_cells[0] if row.raw_cells else None
         if not first_cell and any(value for value in row.raw_cells[1:]):
+            populated_values = [value for value in row.raw_cells[1:] if value]
+            looks_like_header_tier = bool(
+                row_position == 0
+                and len(populated_values) >= 4
+                and all(re.search(r"[A-Za-z]", value) for value in populated_values)
+                and max(len(value) for value in populated_values) <= 80
+            )
             previous = table.rows[row_position - 1] if row_position > 0 else None
             previous_columns = {
                 index for index, value in enumerate(previous.raw_cells[1:], start=1) if value
@@ -63,12 +70,20 @@ def detect_table_issues(table: ParsedTable) -> list[TableIssue]:
             )
             issues.append(
                 TableIssue(
-                    code="SPLIT_ROW" if is_split else "MISSING_ROW_LABEL",
+                    code=(
+                        "HEADER_ROW_AS_DATA"
+                        if looks_like_header_tier
+                        else "SPLIT_ROW" if is_split else "MISSING_ROW_LABEL"
+                    ),
                     severity="HIGH",
                     message=(
-                        "This row appears to contain cells split from the preceding logical row."
-                        if is_split
-                        else "The row label is empty while other cells contain values."
+                        "The first extracted data row appears to be a second header tier."
+                        if looks_like_header_tier
+                        else (
+                            "This row appears to contain cells split from the preceding logical row."
+                            if is_split
+                            else "The row label is empty while other cells contain values."
+                        )
                     ),
                     row_index=row.row_index,
                     column_index=0,
@@ -76,7 +91,7 @@ def detect_table_issues(table: ParsedTable) -> list[TableIssue]:
                 )
             )
         for column_index, value in enumerate(row.raw_cells):
-            if value and len(value) > 300:
+            if value and len(value) > 120:
                 issues.append(
                     TableIssue(
                         code="OVERSIZED_CELL",
@@ -268,23 +283,37 @@ def _apply_llm_repairs(
 ) -> list[TableRepair]:
     token_map = {token.token_id: token for token in tokens}
     repairs: list[TableRepair] = []
-    for proposal in proposals.repairs:
-        try:
-            row = next(row for row in table.rows if row.row_index == proposal.row_index)
-        except StopIteration:
-            continue
-        if proposal.column_index < 0 or proposal.column_index >= len(table.columns):
-            continue
-        original = row.raw_cells[proposal.column_index]
-        if original:
-            continue
-        selected = [token_map[token_id] for token_id in proposal.source_token_ids if token_id in token_map]
-        selected = _reading_order(selected)
+    consumed_row_coverage: dict[int, set[int]] = {}
+    columns_to_delete: set[int] = set()
+
+    def selected_tokens(proposal: object) -> list[SourceToken]:
+        selected = [
+            token_map[token_id]
+            for token_id in proposal.source_token_ids
+            if token_id in token_map
+        ]
+        return _reading_order(selected)
+
+    def supported_value(value: str | None, selected: list[SourceToken]) -> bool:
+        if not value or not selected:
+            return False
         evidence_text = " ".join(token.text for token in selected)
-        if not selected or _normalized(evidence_text) != _normalized(proposal.value):
-            continue
+        return _normalized(evidence_text) == _normalized(value)
+
+    def find_row(row_index: int | None):
+        if row_index is None:
+            return None
+        return next((row for row in table.rows if row.row_index == row_index), None)
+
+    def tokens_align_with_cell(
+        row: object, column_index: int, selected: list[SourceToken]
+    ) -> bool:
         row_bbox = row.metadata.get("source_row_bbox")
-        label_x_range = row.metadata.get("label_x_range") if proposal.column_index == 0 else None
+        column_x_range = (
+            row.metadata.get("label_x_range")
+            if column_index == 0
+            else table.columns[column_index].metadata.get("source_x_range")
+        )
         if row_bbox and any(
             not (
                 float(row_bbox[1])
@@ -293,19 +322,164 @@ def _apply_llm_repairs(
             )
             for token in selected
         ):
-            continue
-        if label_x_range and any(
+            return False
+        if column_x_range and any(
             not (
-                float(label_x_range[0])
+                float(column_x_range[0])
                 <= (token.bbox[0] + token.bbox[2]) / 2
-                < float(label_x_range[1])
+                < float(column_x_range[1])
             )
             for token in selected
         ):
+            return False
+        return True
+
+    def tokens_align_with_header(
+        column_index: int,
+        selected: list[SourceToken],
+        consume_row_indices: list[int],
+        allow_adjacent: bool,
+    ) -> bool:
+        column = table.columns[column_index]
+        x_range = column.metadata.get("source_x_range")
+        y_range = column.metadata.get("header_y_range")
+        if not x_range or not y_range:
+            return False
+        min_x, max_x = map(float, x_range)
+        if allow_adjacent:
+            adjacent = [
+                table.columns[index].metadata.get("source_x_range")
+                for index in range(max(0, column_index - 1), min(len(table.columns), column_index + 2))
+            ]
+            adjacent = [value for value in adjacent if value]
+            if adjacent:
+                min_x = min(float(value[0]) for value in adjacent)
+                max_x = max(float(value[1]) for value in adjacent)
+        min_y, max_y = map(float, y_range)
+        for row_index in consume_row_indices:
+            row = find_row(row_index)
+            row_bbox = row.metadata.get("source_row_bbox") if row else None
+            if row_bbox:
+                max_y = max(max_y, float(row_bbox[3]))
+        return all(
+            min_x <= (token.bbox[0] + token.bbox[2]) / 2 <= max_x
+            and min_y <= (token.bbox[1] + token.bbox[3]) / 2 <= max_y
+            for token in selected
+        )
+
+    for proposal in proposals.repairs:
+        if proposal.column_index < 0 or proposal.column_index >= len(table.columns):
+            continue
+        operation = proposal.operation
+        selected = selected_tokens(proposal)
+
+        if operation in {"REPLACE_HEADER", "MERGE_HEADER"}:
+            column = table.columns[proposal.column_index]
+            if operation == "REPLACE_HEADER" and not column.label.startswith("Column "):
+                continue
+            if not supported_value(proposal.value, selected):
+                continue
+            if any(
+                index != proposal.column_index
+                and _normalized(other.label) == _normalized(proposal.value)
+                for index, other in enumerate(table.columns)
+            ):
+                continue
+            if not tokens_align_with_header(
+                proposal.column_index,
+                selected,
+                proposal.consume_row_indices,
+                allow_adjacent=operation == "MERGE_HEADER",
+            ):
+                continue
+            original = column.label
+            column.label = proposal.value
+            column.semantic_label = proposal.value
+            column.source_labels = [
+                label.strip() for label in proposal.value.split("/") if label.strip()
+            ]
+            repairs.append(
+                TableRepair(
+                    operation=operation,
+                    source="LLM",
+                    provider=provider.name,
+                    model=provider.model,
+                    row_index=0,
+                    column_index=proposal.column_index,
+                    original_value=original,
+                    repaired_value=proposal.value,
+                    source_token_ids=proposal.source_token_ids,
+                    reason=proposal.reason,
+                    confidence=proposal.confidence,
+                )
+            )
+            if operation == "MERGE_HEADER":
+                for row_index in proposal.consume_row_indices:
+                    consumed_row_coverage.setdefault(row_index, set()).add(
+                        proposal.column_index
+                    )
+            continue
+
+        if operation == "DELETE_EMPTY_COLUMN":
+            column = table.columns[proposal.column_index]
+            if not column.label.startswith("Column ") or any(
+                row.raw_cells[proposal.column_index] for row in table.rows
+            ):
+                continue
+            columns_to_delete.add(proposal.column_index)
+            repairs.append(
+                TableRepair(
+                    operation=operation,
+                    source="LLM",
+                    provider=provider.name,
+                    model=provider.model,
+                    row_index=0,
+                    column_index=proposal.column_index,
+                    original_value=column.label,
+                    repaired_value="Column deleted",
+                    reason=proposal.reason,
+                    confidence=proposal.confidence,
+                )
+            )
+            continue
+
+        row = find_row(proposal.row_index)
+        if row is None or not supported_value(proposal.value, selected):
+            continue
+
+        original = row.raw_cells[proposal.column_index]
+        if operation == "REPLACE_CELL" and original:
+            continue
+        if operation == "TRIM_CONTAMINATED_CELL":
+            if not original or len(proposal.value) >= len(original):
+                continue
+        if operation == "REASSIGN_TOKEN":
+            source_row = find_row(proposal.source_row_index)
+            if (
+                original
+                or source_row is None
+                or proposal.source_column_index is None
+                or proposal.source_column_index < 0
+                or proposal.source_column_index >= len(table.columns)
+            ):
+                continue
+            source_value = source_row.raw_cells[proposal.source_column_index]
+            if not source_value or _normalized(source_value) != _normalized(proposal.value):
+                continue
+            if not tokens_align_with_cell(
+                source_row, proposal.source_column_index, selected
+            ):
+                continue
+            source_column = table.columns[proposal.source_column_index]
+            source_row.raw_cells[proposal.source_column_index] = None
+            source_row.values[source_column.key] = None
+            source_row.display_values[source_column.key] = None
+        elif not tokens_align_with_cell(row, proposal.column_index, selected):
             continue
         _apply_cell_value(table, proposal.row_index, proposal.column_index, proposal.value)
         repairs.append(
             TableRepair(
+                operation=operation,
                 source="LLM",
                 provider=provider.name,
                 model=provider.model,
@@ -318,6 +492,28 @@ def _apply_llm_repairs(
                 confidence=proposal.confidence,
             )
         )
+
+    rows_to_remove: set[int] = set()
+    for row_index, covered_columns in consumed_row_coverage.items():
+        row = find_row(row_index)
+        if row is None:
+            continue
+        nonempty_columns = {
+            index for index, value in enumerate(row.raw_cells) if value
+        }
+        if nonempty_columns and nonempty_columns.issubset(covered_columns):
+            rows_to_remove.add(row_index)
+    if rows_to_remove:
+        table.rows = [row for row in table.rows if row.row_index not in rows_to_remove]
+        for row_index, row in enumerate(table.rows, start=1):
+            row.row_index = row_index
+
+    for column_index in sorted(columns_to_delete, reverse=True):
+        column = table.columns.pop(column_index)
+        for row in table.rows:
+            row.raw_cells.pop(column_index)
+            row.values.pop(column.key, None)
+            row.display_values.pop(column.key, None)
     return repairs
 
 
@@ -332,9 +528,14 @@ class TableRepairPipeline:
         repairs = _repair_split_rows(canonical)
         repairs.extend(_repair_missing_labels(canonical, tokens))
         remaining = detect_table_issues(canonical)
-        repairable_issues = [
-            issue for issue in remaining if issue.code == "MISSING_ROW_LABEL"
-        ]
+        repairable_codes = {
+            "MISSING_ROW_LABEL",
+            "PLACEHOLDER_HEADER",
+            "EMPTY_COLUMN",
+            "OVERSIZED_CELL",
+            "HEADER_ROW_AS_DATA",
+        }
+        repairable_issues = [issue for issue in remaining if issue.code in repairable_codes]
         if repairable_issues and self.provider.available:
             try:
                 proposals = self.provider.propose_repairs(

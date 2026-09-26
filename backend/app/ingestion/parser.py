@@ -316,6 +316,30 @@ class AiaPdfParser:
                     is_row_label=column_index == 0,
                 )
             )
+        header_cells = table.rows[0].cells if table.rows else []
+        for column_index, column in enumerate(columns):
+            body_cells = [
+                row.cells[column_index]
+                for row in table.rows[1:]
+                if column_index < len(row.cells) and row.cells[column_index] is not None
+            ]
+            source_cells = body_cells or (
+                [header_cells[column_index]]
+                if column_index < len(header_cells) and header_cells[column_index] is not None
+                else []
+            )
+            if source_cells:
+                column.metadata["source_x_range"] = [
+                    min(cell[0] for cell in source_cells),
+                    max(cell[2] for cell in source_cells),
+                ]
+            if header_cells:
+                visible_header_cells = [cell for cell in header_cells if cell is not None]
+                if visible_header_cells:
+                    column.metadata["header_y_range"] = [
+                        min(cell[1] for cell in visible_header_cells),
+                        max(cell[3] for cell in visible_header_cells),
+                    ]
         title = self._page_title(page_text)
         context: dict[str, str] = {}
         date_match = re.search(r"(?i)as (?:of|at)\s+(31 Dec 2025|30 Nov 2010)", page_text)

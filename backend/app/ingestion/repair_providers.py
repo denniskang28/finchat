@@ -1,19 +1,31 @@
 import json
 import re
 from abc import ABC, abstractmethod
+from typing import Literal
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.config import Settings
 from app.schemas import ParsedTable, SourceToken, TableIssue
 
 
 class CellRepairProposal(BaseModel):
-    row_index: int
+    operation: Literal[
+        "REPLACE_CELL",
+        "REPLACE_HEADER",
+        "MERGE_HEADER",
+        "DELETE_EMPTY_COLUMN",
+        "TRIM_CONTAMINATED_CELL",
+        "REASSIGN_TOKEN",
+    ] = "REPLACE_CELL"
+    row_index: int | None = None
     column_index: int
-    value: str
+    value: str | None = None
     source_token_ids: list[str] = Field(default_factory=list)
+    source_row_index: int | None = None
+    source_column_index: int | None = None
+    consume_row_indices: list[int] = Field(default_factory=list)
     reason: str
     confidence: float = Field(ge=0.0, le=1.0)
 
@@ -83,26 +95,59 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
         tokens: list[SourceToken],
         image_data_url: str,
     ) -> RepairProposalResponse:
+        compact_table = {
+            "table_id": table.table_id,
+            "page_number": table.page_number,
+            "bbox": table.bbox,
+            "title": table.title,
+            "columns": [
+                {
+                    "column_index": index,
+                    "label": column.label,
+                    "source_labels": column.source_labels,
+                    "metadata": column.metadata,
+                }
+                for index, column in enumerate(table.columns)
+            ],
+            "rows": [
+                {
+                    "row_index": row.row_index,
+                    "cells": row.raw_cells,
+                    "metadata": row.metadata,
+                }
+                for row in table.rows
+            ],
+        }
         prompt = {
-            "task": "Propose evidence-backed repairs for missing table cells.",
+            "task": "Propose evidence-backed structural repairs for a financial table.",
             "constraints": [
                 "Return JSON only with a top-level repairs array.",
-                "Only propose REPLACE_CELL repairs for currently empty cells.",
-                "Every character in value must be supported by source_token_ids.",
+                "Allowed operations: REPLACE_CELL, REPLACE_HEADER, MERGE_HEADER, DELETE_EMPTY_COLUMN, TRIM_CONTAMINATED_CELL, REASSIGN_TOKEN.",
+                "REPLACE_CELL fills an empty cell; row_index is one-based and column_index is zero-based.",
+                "REPLACE_HEADER replaces a placeholder header using source tokens.",
+                "MERGE_HEADER combines multi-level header tokens and may list consumed header rows in consume_row_indices.",
+                "When HEADER_ROW_AS_DATA is reported, use MERGE_HEADER for every non-empty cell in that row, combine its label with the outer header, and include that row in consume_row_indices. Do not use REPLACE_HEADER alone for that pattern.",
+                "DELETE_EMPTY_COLUMN is allowed only when every data cell in that column is empty.",
+                "TRIM_CONTAMINATED_CELL replaces an existing contaminated cell with a shorter value supported by a subset of its visual tokens.",
+                "REASSIGN_TOKEN moves an entire source cell to an empty target cell and requires source_row_index and source_column_index.",
+                "Every non-empty value must be supported by source_token_ids.",
                 "Do not change or invent numeric values.",
-                "Use one-based row_index and zero-based column_index.",
                 "Return an empty repairs array when evidence is ambiguous.",
             ],
-            "table": table.model_dump(mode="json"),
+            "table": compact_table,
             "issues": [issue.model_dump(mode="json") for issue in issues],
             "source_tokens": [token.model_dump(mode="json") for token in tokens],
             "response_shape": {
                 "repairs": [
                     {
+                        "operation": "MERGE_HEADER",
                         "row_index": 1,
-                        "column_index": 0,
-                        "value": "Exact text from source tokens",
+                        "column_index": 2,
+                        "value": "1 year / With illiquidity premium",
                         "source_token_ids": ["p1w1"],
+                        "source_row_index": None,
+                        "source_column_index": None,
+                        "consume_row_indices": [1],
                         "reason": "Short evidence-based explanation",
                         "confidence": 0.95,
                     }
@@ -115,6 +160,8 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
             json={
                 "model": self.model,
                 "temperature": 0,
+                "enable_thinking": False,
+                "max_tokens": 3000,
                 "messages": [
                     {
                         "role": "system",
@@ -139,7 +186,13 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
             )
         match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, flags=re.DOTALL)
         payload = json.loads(match.group(1) if match else content)
-        return RepairProposalResponse.model_validate(payload)
+        valid_repairs = []
+        for candidate in payload.get("repairs", []):
+            try:
+                valid_repairs.append(CellRepairProposal.model_validate(candidate))
+            except ValidationError:
+                continue
+        return RepairProposalResponse(repairs=valid_repairs)
 
 
 def create_table_repair_provider(settings: Settings) -> TableRepairProvider:
