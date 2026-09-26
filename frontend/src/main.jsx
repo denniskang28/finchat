@@ -11,6 +11,7 @@ import {
   Table2,
   Upload,
   Wrench,
+  X,
 } from "lucide-react";
 import "./styles.css";
 
@@ -25,14 +26,51 @@ async function api(path, options) {
   return response.json();
 }
 
-function Metric({ label, value }) {
+function Metric({ label, value, active = false, onClick, title }) {
   return (
-    <div className="metric">
+    <button
+      type="button"
+      className={`metric ${active ? "active" : ""}`}
+      onClick={onClick}
+      title={title}
+      aria-pressed={active}
+      aria-controls="parsed-table-results"
+    >
       <span>{label}</span>
       <strong>{value ?? "-"}</strong>
-    </div>
+    </button>
   );
 }
+
+const TABLE_FILTERS = {
+  pages: {
+    label: "All pages",
+    matches: () => true,
+  },
+  tables: {
+    label: "All tables",
+    matches: () => true,
+  },
+  rawRows: {
+    label: "Tables with raw rows",
+    matches: (table) => (table.raw_rows?.length ?? table.raw_parsed_table?.rows?.length ?? 0) > 0,
+  },
+  repairs: {
+    label: "Tables with repairs",
+    matches: (table) => (table.repairs?.length ?? 0) > 0,
+  },
+  review: {
+    label: "Tables needing review",
+    matches: (table) => table.quality?.status === "NEEDS_REVIEW",
+  },
+  warnings: {
+    label: "Tables with warnings",
+    matches: (table) => (
+      (table.parsed_table?.parse_warnings?.length ?? 0)
+      + (table.quality?.remaining_issues?.length ?? 0)
+    ) > 0,
+  },
+};
 
 function StatusBadge({ status }) {
   const ready = status === "READY";
@@ -214,18 +252,28 @@ function App() {
   const [documents, setDocuments] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [tables, setTables] = useState([]);
+  const [tableFilter, setTableFilter] = useState("pages");
   const [pageFilter, setPageFilter] = useState("all");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const selected = documents.find((document) => document.id === selectedId);
+  const statusFilteredTables = useMemo(
+    () => tables.filter(TABLE_FILTERS[tableFilter].matches),
+    [tables, tableFilter],
+  );
   const pages = useMemo(
-    () => [...new Set(tables.map((table) => table.parsed_table.page_number))].sort((a, b) => a - b),
-    [tables],
+    () => [...new Set(statusFilteredTables.map((table) => table.parsed_table.page_number))].sort((a, b) => a - b),
+    [statusFilteredTables],
   );
   const filteredTables = pageFilter === "all"
-    ? tables
-    : tables.filter((table) => table.parsed_table.page_number === Number(pageFilter));
+    ? statusFilteredTables
+    : statusFilteredTables.filter((table) => table.parsed_table.page_number === Number(pageFilter));
+
+  function applyTableFilter(filter) {
+    setTableFilter(filter);
+    setPageFilter("all");
+  }
 
   async function loadDocuments(preferredId) {
     const result = await api("/api/documents");
@@ -241,6 +289,7 @@ function App() {
       return;
     }
     setTables(await api(`/api/documents/${documentId}/tables`));
+    setTableFilter("pages");
     setPageFilter("all");
   }
 
@@ -350,33 +399,68 @@ function App() {
                   <StatusBadge status={selected.status} />
                 </div>
                 <div className="metrics">
-                  <Metric label="Pages" value={selected.page_count} />
-                  <Metric label="Tables" value={selected.metadata.tables} />
-                  <Metric label="Raw rows" value={selected.metadata.raw_rows} />
-                  <Metric label="Repairs" value={selected.metadata.table_repairs ?? 0} />
-                  <Metric label="Review" value={selected.metadata.needs_review_tables ?? 0} />
-                  <Metric label="Warnings" value={selected.metadata.parse_warnings} />
+                  <Metric label="Pages" value={selected.page_count} active={tableFilter === "pages"} onClick={() => applyTableFilter("pages")} title="Show tables from all parsed pages" />
+                  <Metric label="Tables" value={selected.metadata.tables} active={tableFilter === "tables"} onClick={() => applyTableFilter("tables")} title="Show every detected table" />
+                  <Metric label="Raw rows" value={selected.metadata.raw_rows} active={tableFilter === "rawRows"} onClick={() => applyTableFilter("rawRows")} title="Show tables containing extracted rows" />
+                  <Metric label="Repairs" value={selected.metadata.table_repairs ?? 0} active={tableFilter === "repairs"} onClick={() => applyTableFilter("repairs")} title="Show pages where repairs were applied" />
+                  <Metric label="Review" value={selected.metadata.needs_review_tables ?? 0} active={tableFilter === "review"} onClick={() => applyTableFilter("review")} title="Show pages that still need review" />
+                  <Metric label="Warnings" value={selected.metadata.parse_warnings} active={tableFilter === "warnings"} onClick={() => applyTableFilter("warnings")} title="Show pages with warnings or unresolved issues" />
                 </div>
               </section>
 
               <div className="table-toolbar">
                 <div>
                   <strong>Parsed tables</strong>
-                  <span>{filteredTables.length} shown</span>
+                  <span>
+                    {TABLE_FILTERS[tableFilter].label} · {filteredTables.length} {filteredTables.length === 1 ? "table" : "tables"}
+                    {pageFilter === "all" ? ` on ${pages.length} ${pages.length === 1 ? "page" : "pages"}` : ` on page ${pageFilter}`}
+                  </span>
                 </div>
-                <label>
-                  Page
-                  <select value={pageFilter} onChange={(event) => setPageFilter(event.target.value)}>
-                    <option value="all">All pages</option>
-                    {pages.map((page) => <option key={page} value={page}>{page}</option>)}
-                  </select>
-                </label>
+                <div className="toolbar-actions">
+                  <label>
+                    Page
+                    <select value={pageFilter} onChange={(event) => setPageFilter(event.target.value)}>
+                      <option value="all">All matching pages</option>
+                      {pages.map((page) => <option key={page} value={page}>{page}</option>)}
+                    </select>
+                  </label>
+                  {(tableFilter !== "pages" || pageFilter !== "all") && (
+                    <button className="clear-filter" type="button" onClick={() => applyTableFilter("pages")}>
+                      <X size={15} /> Clear filter
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div className="table-list">
+              {!["pages", "tables", "rawRows"].includes(tableFilter) && pages.length > 0 && (
+                <nav className="matching-pages" aria-label={`${TABLE_FILTERS[tableFilter].label} page filters`}>
+                  <span>Matching pages</span>
+                  <button type="button" className={pageFilter === "all" ? "active" : ""} onClick={() => setPageFilter("all")}>All</button>
+                  {pages.map((page) => (
+                    <button
+                      type="button"
+                      key={page}
+                      className={Number(pageFilter) === page ? "active" : ""}
+                      onClick={() => setPageFilter(String(page))}
+                    >
+                      {page}
+                    </button>
+                  ))}
+                </nav>
+              )}
+
+              <div className="table-list" id="parsed-table-results" aria-live="polite">
                 {filteredTables.map((table) => (
                   <TablePanel key={table.parsed_table.table_id} table={table} />
                 ))}
+                {filteredTables.length === 0 && (
+                  <div className="filter-empty">
+                    <CheckCircle2 size={28} />
+                    <strong>No matching tables</strong>
+                    <span>This document has no tables matching {TABLE_FILTERS[tableFilter].label.toLowerCase()}.</span>
+                    <button type="button" onClick={() => applyTableFilter("pages")}>Show all parsed pages</button>
+                  </div>
+                )}
               </div>
             </>
           )}
