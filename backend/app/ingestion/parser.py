@@ -7,7 +7,8 @@ import pdfplumber
 from pdfplumber.page import Page
 from pdfplumber.table import Table
 
-from app.schemas import ParsedColumn, ParsedRow, ParsedTable
+from app.ingestion.table_quality import TableRepairPipeline
+from app.schemas import ParsedColumn, ParsedRow, ParsedTable, ParsedTableArtifact
 
 
 def _clean(value: object) -> str | None:
@@ -30,14 +31,25 @@ def _pad(row: Iterable[object], width: int) -> list[str | None]:
 
 
 class AiaPdfParser:
-    def parse(self, pdf_path: Path, document_id: uuid.UUID) -> tuple[list[str], list[ParsedTable]]:
+    def __init__(self, repair_pipeline: TableRepairPipeline | None = None) -> None:
+        self.repair_pipeline = repair_pipeline
+
+    def parse(
+        self, pdf_path: Path, document_id: uuid.UUID
+    ) -> tuple[list[str], list[ParsedTableArtifact]]:
         pages: list[str] = []
-        parsed_tables: list[ParsedTable] = []
+        parsed_tables: list[ParsedTableArtifact] = []
         with pdfplumber.open(pdf_path) as pdf:
             for page_number, page in enumerate(pdf.pages, start=1):
                 page_text = page.extract_text(layout=True) or ""
                 pages.append(page_text.strip())
-                parsed_tables.extend(self.parse_page(page, page_number, document_id, page_text))
+                for table in self.parse_page(page, page_number, document_id, page_text):
+                    if self.repair_pipeline:
+                        parsed_tables.append(self.repair_pipeline.process(page, table))
+                    else:
+                        parsed_tables.append(
+                            ParsedTableArtifact(raw_table=table, canonical_table=table)
+                        )
         return pages, parsed_tables
 
     def parse_page(
@@ -309,6 +321,21 @@ class AiaPdfParser:
         date_match = re.search(r"(?i)as (?:of|at)\s+(31 Dec 2025|30 Nov 2010)", page_text)
         if date_match:
             context["as_of_date"] = date_match.group(1)
+        parsed_rows = self._rows_from_cells(normalized[1:], columns)
+        for parsed_row, source_row in zip(parsed_rows, table.rows[1:], strict=False):
+            cells = [cell for cell in source_row.cells if cell is not None]
+            if not cells:
+                continue
+            parsed_row.metadata["source_row_bbox"] = [
+                min(cell[0] for cell in cells),
+                min(cell[1] for cell in cells),
+                max(cell[2] for cell in cells),
+                max(cell[3] for cell in cells),
+            ]
+            parsed_row.metadata["label_x_range"] = [
+                float(table.bbox[0]),
+                float(cells[0][0] if source_row.cells[0] is None else source_row.cells[0][2]),
+            ]
         return ParsedTable(
             table_id=f"p{page_number}_t{table_index}",
             document_id=document_id,
@@ -317,7 +344,7 @@ class AiaPdfParser:
             title=f"{title} - Table {table_index}",
             context=context,
             columns=columns,
-            rows=self._rows_from_cells(normalized[1:], columns),
+            rows=parsed_rows,
             footnotes=self._note_lines(page_text),
             extraction_method="pdfplumber.lines.generic",
             parse_warnings=[

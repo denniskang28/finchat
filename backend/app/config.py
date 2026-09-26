@@ -8,6 +8,15 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/semantic_rag"
     upload_dir: Path = Path("data/uploads")
     cors_origins: str = "http://localhost:5173"
+    table_repair_enabled: bool = True
+    table_repair_provider: str = "alibaba"
+    table_repair_timeout_seconds: float = 90.0
+    dashscope_api_key: str = ""
+    alibaba_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    alibaba_vision_model: str = "qwen-vl-max-latest"
+    openai_compatible_api_key: str = ""
+    openai_compatible_base_url: str = ""
+    openai_compatible_vision_model: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -19,4 +28,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

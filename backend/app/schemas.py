@@ -45,6 +45,50 @@ class ParsedTable(BaseModel):
     parse_warnings: list[str] = Field(default_factory=list)
 
 
+class SourceToken(BaseModel):
+    token_id: str
+    text: str
+    bbox: tuple[float, float, float, float]
+
+
+class TableIssue(BaseModel):
+    code: str
+    severity: Literal["LOW", "MEDIUM", "HIGH"]
+    message: str
+    row_index: int | None = None
+    column_index: int | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class TableRepair(BaseModel):
+    operation: Literal["REPLACE_CELL", "MERGE_SPLIT_ROW"] = "REPLACE_CELL"
+    source: Literal["DETERMINISTIC", "LLM"]
+    provider: str | None = None
+    model: str | None = None
+    row_index: int
+    column_index: int
+    original_value: str | None = None
+    repaired_value: str
+    source_token_ids: list[str] = Field(default_factory=list)
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    applied: bool = True
+
+
+class TableQuality(BaseModel):
+    status: Literal["PASS", "REPAIRED", "NEEDS_REVIEW"] = "PASS"
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    initial_issues: list[TableIssue] = Field(default_factory=list)
+    remaining_issues: list[TableIssue] = Field(default_factory=list)
+
+
+class ParsedTableArtifact(BaseModel):
+    raw_table: ParsedTable
+    canonical_table: ParsedTable
+    quality: TableQuality = Field(default_factory=TableQuality)
+    repairs: list[TableRepair] = Field(default_factory=list)
+
+
 class RowRepresentation(BaseModel):
     comparison_key: str
     row_index: int
@@ -54,6 +98,9 @@ class RowRepresentation(BaseModel):
 
 class TableDebug(BaseModel):
     parsed_table: ParsedTable
+    raw_parsed_table: ParsedTable | None = None
+    quality: TableQuality = Field(default_factory=TableQuality)
+    repairs: list[TableRepair] = Field(default_factory=list)
     raw_rows: list[RowRepresentation]
     markdown: str
     semantic_rows: list[RowRepresentation]
@@ -78,4 +125,3 @@ class UploadResponse(DocumentSummary):
 class PageText(BaseModel):
     page_number: int
     text: str
-

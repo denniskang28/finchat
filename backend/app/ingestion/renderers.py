@@ -1,21 +1,34 @@
 from app.ingestion.parser import slugify
-from app.schemas import ParsedColumn, ParsedRow, ParsedTable, RowRepresentation, TableDebug
+from app.schemas import (
+    ParsedColumn,
+    ParsedRow,
+    ParsedTable,
+    ParsedTableArtifact,
+    RowRepresentation,
+    TableDebug,
+)
 
 
 def _comparison_key(table: ParsedTable, row: ParsedRow) -> str:
     return f"{table.table_id}:{slugify(row.row_label)}"
 
 
-def render_raw_rows(table: ParsedTable) -> list[RowRepresentation]:
-    return [
-        RowRepresentation(
-            comparison_key=_comparison_key(table, row),
-            row_index=row.row_index,
-            row_label=row.row_label,
-            content=" | ".join(value or "" for value in row.raw_cells),
+def render_raw_rows(
+    table: ParsedTable, key_table: ParsedTable | None = None
+) -> list[RowRepresentation]:
+    key_rows = {row.row_index: row for row in (key_table or table).rows}
+    representations: list[RowRepresentation] = []
+    for row in table.rows:
+        key_row = key_rows.get(row.row_index, row)
+        representations.append(
+            RowRepresentation(
+                comparison_key=_comparison_key(key_table or table, key_row),
+                row_index=row.row_index,
+                row_label=row.row_label,
+                content=" | ".join(value or "" for value in row.raw_cells),
+            )
         )
-        for row in table.rows
-    ]
+    return representations
 
 
 def render_markdown(table: ParsedTable) -> str:
@@ -91,11 +104,23 @@ def render_semantic_rows(table: ParsedTable) -> list[RowRepresentation]:
     return representations
 
 
-def build_table_debug(table: ParsedTable) -> TableDebug:
+def build_table_debug(table: ParsedTable | ParsedTableArtifact) -> TableDebug:
+    if isinstance(table, ParsedTableArtifact):
+        raw_table = table.raw_table
+        canonical = table.canonical_table
+        quality = table.quality
+        repairs = table.repairs
+    else:
+        raw_table = table
+        canonical = table
+        quality = None
+        repairs = []
     return TableDebug(
-        parsed_table=table,
-        raw_rows=render_raw_rows(table),
-        markdown=render_markdown(table),
-        semantic_rows=render_semantic_rows(table),
+        parsed_table=canonical,
+        raw_parsed_table=raw_table,
+        **({"quality": quality} if quality is not None else {}),
+        repairs=repairs,
+        raw_rows=render_raw_rows(raw_table, canonical),
+        markdown=render_markdown(canonical),
+        semantic_rows=render_semantic_rows(canonical),
     )
-

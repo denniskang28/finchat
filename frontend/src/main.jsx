@@ -7,8 +7,10 @@ import {
   FileText,
   LoaderCircle,
   RefreshCw,
+  ShieldCheck,
   Table2,
   Upload,
+  Wrench,
 } from "lucide-react";
 import "./styles.css";
 
@@ -42,13 +44,44 @@ function StatusBadge({ status }) {
   );
 }
 
+function TableGrid({ table }) {
+  return (
+    <div className="table-scroll" role="tabpanel">
+      <table>
+        <thead>
+          <tr>
+            {table.columns.map((column) => (
+              <th key={column.key}>{column.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {table.rows.map((row) => (
+            <tr key={row.row_index} className={row.is_total ? "total" : ""}>
+              {row.raw_cells.map((cell, index) => (
+                <td key={`${row.row_index}-${index}`} className={cell == null ? "missing-cell" : ""}>
+                  {cell ?? "NULL"}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function TablePanel({ table }) {
   const [tab, setTab] = useState("raw");
   const parsed = table.parsed_table;
+  const raw = table.raw_parsed_table || parsed;
+  const quality = table.quality || { status: "PASS", confidence: 1, initial_issues: [], remaining_issues: [] };
   const tabs = [
     ["raw", "Raw extraction"],
+    ["canonical", "Canonical table"],
     ["markdown", "Original Markdown"],
     ["semantic", "Semantic rows"],
+    ["quality", "Quality & repairs"],
   ];
 
   return (
@@ -62,6 +95,7 @@ function TablePanel({ table }) {
           {parsed.subtitle && <p>{parsed.subtitle}</p>}
         </div>
         <div className="table-stats" aria-label="Table dimensions">
+          <span className={`quality-chip ${quality.status.toLowerCase()}`}>{quality.status.replace("_", " ")}</span>
           <span>{parsed.rows.length} rows</span>
           <span>{parsed.columns.length} columns</span>
         </div>
@@ -92,28 +126,9 @@ function TablePanel({ table }) {
         ))}
       </div>
 
-      {tab === "raw" && (
-        <div className="table-scroll" role="tabpanel">
-          <table>
-            <thead>
-              <tr>
-                {parsed.columns.map((column) => (
-                  <th key={column.key}>{column.label}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {parsed.rows.map((row) => (
-                <tr key={row.row_index} className={row.is_total ? "total" : ""}>
-                  {row.raw_cells.map((cell, index) => (
-                    <td key={`${row.row_index}-${index}`}>{cell ?? ""}</td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      {tab === "raw" && <TableGrid table={raw} />}
+
+      {tab === "canonical" && <TableGrid table={parsed} />}
 
       {tab === "markdown" && (
         <pre className="code-block" role="tabpanel">{table.markdown}</pre>
@@ -130,6 +145,64 @@ function TablePanel({ table }) {
               <pre>{row.content}</pre>
             </div>
           ))}
+        </div>
+      )}
+
+      {tab === "quality" && (
+        <div className="quality-panel" role="tabpanel">
+          <div className="quality-summary">
+            <ShieldCheck size={18} />
+            <div>
+              <strong>{quality.status.replace("_", " ")}</strong>
+              <span>{Math.round(quality.confidence * 100)}% structural confidence</span>
+            </div>
+          </div>
+
+          <section>
+            <h3>Initial issues</h3>
+            {quality.initial_issues.length === 0 ? <p className="quiet">No structural issues detected.</p> : (
+              <div className="issue-list">
+                {quality.initial_issues.map((issue, index) => (
+                  <div className="issue-row" key={`${issue.code}-${index}`}>
+                    <code>{issue.code}</code>
+                    <span>{issue.message}</span>
+                    <small>{issue.severity}{issue.row_index ? ` · row ${issue.row_index}` : ""}</small>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <h3>Applied repairs</h3>
+            {table.repairs.length === 0 ? <p className="quiet">No repairs applied.</p> : (
+              <div className="repair-list">
+                {table.repairs.map((repair, index) => (
+                  <div className="repair-row" key={`${repair.row_index}-${repair.column_index}-${index}`}>
+                    <Wrench size={16} />
+                    <div>
+                      <strong>{repair.operation.replaceAll("_", " ")} · row {repair.row_index}, column {repair.column_index + 1}</strong>
+                      <p>{repair.original_value ?? "NULL"} → {repair.repaired_value}</p>
+                      <small>{repair.source}{repair.model ? ` · ${repair.model}` : ""} · {Math.round(repair.confidence * 100)}% · {repair.source_token_ids.length} source tokens</small>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <h3>Remaining issues</h3>
+            {quality.remaining_issues.length === 0 ? <p className="quiet">No unresolved structural issues.</p> : (
+              <div className="issue-list">
+                {quality.remaining_issues.map((issue, index) => (
+                  <div className="issue-row" key={`${issue.code}-${index}`}>
+                    <code>{issue.code}</code><span>{issue.message}</span><small>{issue.severity}</small>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
         </div>
       )}
     </article>
@@ -280,6 +353,8 @@ function App() {
                   <Metric label="Pages" value={selected.page_count} />
                   <Metric label="Tables" value={selected.metadata.tables} />
                   <Metric label="Raw rows" value={selected.metadata.raw_rows} />
+                  <Metric label="Repairs" value={selected.metadata.table_repairs ?? 0} />
+                  <Metric label="Review" value={selected.metadata.needs_review_tables ?? 0} />
                   <Metric label="Warnings" value={selected.metadata.parse_warnings} />
                 </div>
               </section>
@@ -314,4 +389,3 @@ function App() {
 createRoot(document.getElementById("root")).render(
   <React.StrictMode><App /></React.StrictMode>,
 );
-

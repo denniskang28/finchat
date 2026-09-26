@@ -23,6 +23,15 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/semantic_rag
       UPLOAD_DIR: /app/data/uploads
       CORS_ORIGINS: http://localhost:5173
+      TABLE_REPAIR_ENABLED: ${TABLE_REPAIR_ENABLED:-true}
+      TABLE_REPAIR_PROVIDER: ${TABLE_REPAIR_PROVIDER:-alibaba}
+      TABLE_REPAIR_TIMEOUT_SECONDS: ${TABLE_REPAIR_TIMEOUT_SECONDS:-90}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      ALIBABA_BASE_URL: ${ALIBABA_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      ALIBABA_VISION_MODEL: ${ALIBABA_VISION_MODEL:-qwen-vl-max-latest}
+      OPENAI_COMPATIBLE_API_KEY: ${OPENAI_COMPATIBLE_API_KEY:-}
+      OPENAI_COMPATIBLE_BASE_URL: ${OPENAI_COMPATIBLE_BASE_URL:-}
+      OPENAI_COMPATIBLE_VISION_MODEL: ${OPENAI_COMPATIBLE_VISION_MODEL:-}
     ports:
       - "8000:8000"
     volumes:
@@ -44,4 +53,3 @@ services:
 
 volumes:
   postgres_data:
-

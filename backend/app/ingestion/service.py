@@ -7,14 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.ingestion.parser import AiaPdfParser
+from app.ingestion.repair_providers import create_table_repair_provider
 from app.ingestion.renderers import build_table_debug
+from app.ingestion.table_quality import TableRepairPipeline
 from app.models import Chunk, Document
 
 
 class IngestionService:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.parser = AiaPdfParser()
+        provider = create_table_repair_provider(self.settings)
+        self.parser = AiaPdfParser(TableRepairPipeline(provider))
 
     async def ingest(self, upload: UploadFile, session: AsyncSession) -> Document:
         filename = Path(upload.filename or "document.pdf").name
@@ -59,9 +62,16 @@ class IngestionService:
             raw_row_count = 0
             semantic_row_count = 0
             warning_count = 0
-            for table in tables:
-                debug = build_table_debug(table)
-                warning_count += len(table.parse_warnings)
+            repaired_table_count = 0
+            review_table_count = 0
+            repair_count = 0
+            for artifact in tables:
+                table = artifact.canonical_table
+                debug = build_table_debug(artifact)
+                warning_count += len(table.parse_warnings) + len(artifact.quality.remaining_issues)
+                repair_count += len(artifact.repairs)
+                repaired_table_count += artifact.quality.status == "REPAIRED"
+                review_table_count += artifact.quality.status == "NEEDS_REVIEW"
                 debug_json = debug.model_dump(mode="json")
                 session.add(
                     Chunk(
@@ -132,6 +142,11 @@ class IngestionService:
                 "raw_rows": raw_row_count,
                 "semantic_rows": semantic_row_count,
                 "parse_warnings": warning_count,
+                "table_repairs": repair_count,
+                "repaired_tables": repaired_table_count,
+                "needs_review_tables": review_table_count,
+                "table_repair_provider": self.settings.table_repair_provider,
+                "llm_repair_available": create_table_repair_provider(self.settings).available,
             }
             await session.commit()
             await session.refresh(document)
@@ -143,4 +158,3 @@ class IngestionService:
             session.add(document)
             await session.commit()
             raise
-

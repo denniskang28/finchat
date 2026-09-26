@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.documents import router as documents_router
 from app.config import get_settings
 from app.db import init_db
+from app.ingestion.repair_providers import create_table_repair_provider
 
 
 @asynccontextmanager
@@ -33,6 +34,15 @@ app.include_router(documents_router)
 
 
 @app.get("/api/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "scope": "ingestion-and-table-debug"}
-
+async def health() -> dict[str, object]:
+    provider = create_table_repair_provider(settings)
+    return {
+        "status": "ok",
+        "scope": "ingestion-and-table-debug",
+        "table_repair": {
+            "enabled": settings.table_repair_enabled,
+            "provider": provider.name,
+            "model": provider.model,
+            "llm_available": provider.available,
+        },
+    }

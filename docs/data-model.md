@@ -65,6 +65,44 @@ class ParsedTable(BaseModel):
     parse_warnings: list[str] = Field(default_factory=list)
 
 
+class TableIssue(BaseModel):
+    code: str
+    severity: Literal["LOW", "MEDIUM", "HIGH"]
+    message: str
+    row_index: int | None
+    column_index: int | None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class TableRepair(BaseModel):
+    operation: Literal["REPLACE_CELL", "MERGE_SPLIT_ROW"]
+    source: Literal["DETERMINISTIC", "LLM"]
+    provider: str | None
+    model: str | None
+    row_index: int
+    column_index: int
+    original_value: str | None
+    repaired_value: str
+    source_token_ids: list[str]
+    reason: str
+    confidence: float
+    applied: bool
+
+
+class TableQuality(BaseModel):
+    status: Literal["PASS", "REPAIRED", "NEEDS_REVIEW"]
+    confidence: float
+    initial_issues: list[TableIssue]
+    remaining_issues: list[TableIssue]
+
+
+class ParsedTableArtifact(BaseModel):
+    raw_table: ParsedTable             # immutable parser output
+    canonical_table: ParsedTable       # accepted evidence-backed repairs
+    quality: TableQuality
+    repairs: list[TableRepair]
+
+
 class Chunk(BaseModel):
     id: UUID
     document_id: UUID
@@ -116,6 +154,9 @@ class RetrievedChunk(BaseModel):
 - Every `RAW_ROW` and `SEMANTIC_ROW` pair has the same `comparison_key` and source metadata.
 - `content` is exactly what is embedded, lexically indexed, reranked, and displayed for that arm.
 - Scores from different retrieval stages are never collapsed into a generic `score`.
+- `raw_table` is never overwritten by repair processing.
+- Every canonical replacement must cite source PDF token IDs.
+- LLM output is a repair proposal; deterministic validation decides whether it is applied.
 
 ## 3. Minimum PostgreSQL + pgvector schema
 
