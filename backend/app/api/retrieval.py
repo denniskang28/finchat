@@ -28,6 +28,31 @@ async def _document(document_id: UUID, session: AsyncSession) -> Document:
     return document
 
 
+async def resolve_documents(
+    request: RetrievalRequest, session: AsyncSession
+) -> list[Document]:
+    statement = select(Document).where(Document.status == "READY")
+    if request.document_id:
+        statement = statement.where(Document.id == request.document_id)
+    elif request.document_ids:
+        statement = statement.where(Document.id.in_(request.document_ids))
+    else:
+        statement = statement.where(Document.knowledge_base_id == request.knowledge_base_id)
+    if request.company:
+        statement = statement.where(Document.company.ilike(request.company.strip()))
+    if request.fiscal_year:
+        statement = statement.where(Document.fiscal_year == request.fiscal_year)
+    if request.document_type:
+        statement = statement.where(Document.document_type == request.document_type.strip())
+    documents = list((await session.execute(statement.order_by(Document.created_at))).scalars())
+    if not documents:
+        raise HTTPException(
+            status_code=404,
+            detail="No ready documents matched the requested retrieval scope.",
+        )
+    return documents
+
+
 @router.post("/documents/{document_id}/index", response_model=IndexResponse)
 async def index_document(
     document_id: UUID,
@@ -84,25 +109,7 @@ async def search(
     request: RetrievalRequest,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    statement = select(Document).where(Document.status == "READY")
-    if request.document_id:
-        statement = statement.where(Document.id == request.document_id)
-    elif request.document_ids:
-        statement = statement.where(Document.id.in_(request.document_ids))
-    else:
-        statement = statement.where(Document.knowledge_base_id == request.knowledge_base_id)
-    if request.company:
-        statement = statement.where(Document.company.ilike(request.company.strip()))
-    if request.fiscal_year:
-        statement = statement.where(Document.fiscal_year == request.fiscal_year)
-    if request.document_type:
-        statement = statement.where(Document.document_type == request.document_type.strip())
-    documents = list((await session.execute(statement.order_by(Document.created_at))).scalars())
-    if not documents:
-        raise HTTPException(
-            status_code=404,
-            detail="No ready documents matched the requested retrieval scope.",
-        )
+    documents = await resolve_documents(request, session)
     try:
         return await RetrievalService().search(
             documents,

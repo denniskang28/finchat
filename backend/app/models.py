@@ -99,3 +99,13 @@ class Chunk(Base):
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     document: Mapped[Document] = relationship(back_populates="chunks")
+
+
+class QARetrieval(Base):
+    __tablename__ = "qa_retrievals"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    retrieval_json: Mapped[dict] = mapped_column("retrieval", JSONB, nullable=False)
+    evidence_json: Mapped[list] = mapped_column("evidence", JSONB, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())

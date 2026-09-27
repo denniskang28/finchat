@@ -12,6 +12,7 @@ import {
   GitMerge,
   Library,
   LoaderCircle,
+  MessageSquareText,
   Plus,
   RefreshCw,
   Search,
@@ -580,6 +581,177 @@ function RetrievalDebugger({ documentId, knowledgeBaseId, knowledgeBaseOnly = fa
   );
 }
 
+function QAWorkspace({ knowledgeBaseId, onError }) {
+  const [question, setQuestion] = useState("2024到2025 AIA美国公司债变化如何，占公司债组合多少？");
+  const [mode, setMode] = useState("PRODUCTION");
+  const [company, setCompany] = useState("");
+  const [fiscalYear, setFiscalYear] = useState("");
+  const [snapshot, setSnapshot] = useState(null);
+  const [stage, setStage] = useState("reranked_results");
+  const [conversation, setConversation] = useState([]);
+  const [retrieving, setRetrieving] = useState(false);
+  const [answering, setAnswering] = useState(false);
+  const [evidenceUpdated, setEvidenceUpdated] = useState(false);
+
+  async function retrieveEvidence() {
+    if (!question.trim()) return null;
+    setRetrieving(true);
+    onError("");
+    try {
+      const result = await api("/api/qa/retrieve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          knowledge_base_id: knowledgeBaseId,
+          query: question.trim(),
+          mode,
+          ...(company.trim() ? { company: company.trim() } : {}),
+          ...(fiscalYear ? { fiscal_year: Number(fiscalYear) } : {}),
+        }),
+      });
+      setSnapshot(result);
+      setStage("reranked_results");
+      setEvidenceUpdated(true);
+      return result;
+    } catch (err) {
+      onError(err.message);
+      return null;
+    } finally {
+      setRetrieving(false);
+    }
+  }
+
+  async function generateAnswer(retrievalSnapshot, replaceLatest = false) {
+    if (!retrievalSnapshot) return;
+    setAnswering(true);
+    onError("");
+    try {
+      const result = await api(`/api/qa/${retrievalSnapshot.retrieval_id}/answer`, { method: "POST" });
+      const turn = { question: retrievalSnapshot.retrieval.original_query, ...result };
+      setConversation((current) => {
+        const latestUsesSameSnapshot = current.at(-1)?.retrieval_id === result.retrieval_id;
+        return replaceLatest && latestUsesSameSnapshot
+          ? [...current.slice(0, -1), turn]
+          : [...current, turn];
+      });
+      setEvidenceUpdated(false);
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setAnswering(false);
+    }
+  }
+
+  async function ask(event) {
+    event.preventDefault();
+    const retrievalSnapshot = await retrieveEvidence();
+    if (retrievalSnapshot) await generateAnswer(retrievalSnapshot);
+  }
+
+  async function retrieveAgain() {
+    await retrieveEvidence();
+  }
+
+  async function regenerateAnswer() {
+    await generateAnswer(snapshot, conversation.length > 0);
+  }
+
+  const retrieval = snapshot?.retrieval;
+  const hits = retrieval?.[stage] || [];
+  return (
+    <section className="qa-workspace">
+      <div className="qa-left">
+        <form className="qa-composer" onSubmit={ask}>
+          <label htmlFor="qa-question">Question</label>
+          <textarea id="qa-question" value={question} onChange={(event) => setQuestion(event.target.value)} rows={3} />
+          <div className="qa-composer-controls">
+            <div className="mode-control" aria-label="QA retrieval mode">
+              {["BASELINE", "SEMANTIC", "PRODUCTION"].map((value) => (
+                <button type="button" key={value} className={mode === value ? "active" : ""} onClick={() => setMode(value)}>{value[0] + value.slice(1).toLowerCase()}</button>
+              ))}
+            </div>
+            <button type="submit" className="primary-button" disabled={retrieving || answering || !question.trim()}>
+              {retrieving || answering ? <LoaderCircle className="spin" size={16} /> : <MessageSquareText size={16} />}
+              {retrieving ? "Retrieving" : answering ? "Answering" : "Ask"}
+            </button>
+          </div>
+          <div className="qa-filters">
+            <label>Company<input value={company} onChange={(event) => setCompany(event.target.value)} placeholder="All companies" /></label>
+            <label>Fiscal year<input type="number" min="1900" max="2200" value={fiscalYear} onChange={(event) => setFiscalYear(event.target.value)} placeholder="All years" /></label>
+          </div>
+        </form>
+
+        <div className="conversation-heading"><MessageSquareText size={16} /><strong>Conversation</strong><span>{conversation.length}</span></div>
+        <div className="conversation-list">
+          {conversation.map((turn, index) => (
+            <article className="conversation-turn" key={`${turn.retrieval_id}-${index}`}>
+              <div className="question-bubble"><small>Question</small><p>{turn.question}</p></div>
+              <div className={`answer-block ${turn.insufficient_evidence ? "insufficient" : ""}`}>
+                <small>DeepSeek answer</small>
+                <p>{turn.answer}</p>
+                <div className="answer-meta"><span>{turn.model}</span>{turn.insufficient_evidence && <span>Insufficient evidence</span>}</div>
+              </div>
+              <div className="citation-list">
+                <strong>Citations</strong>
+                {turn.citations.map((citation) => (
+                  <div key={`${citation.chunk_id}-${citation.evidence_number}`}>
+                    <span>[E{citation.evidence_number}]</span>
+                    <p>{citation.filename} · Page {citation.page}</p>
+                    <code>{citation.chunk_id}</code>
+                  </div>
+                ))}
+                {turn.citations.length === 0 && <p className="quiet">No citations returned.</p>}
+              </div>
+            </article>
+          ))}
+          {conversation.length === 0 && <div className="qa-empty"><MessageSquareText size={26} /><span>No answers yet</span></div>}
+        </div>
+        <div className="qa-answer-actions">
+          <button type="button" className="secondary-button" onClick={retrieveAgain} disabled={retrieving || answering || !question.trim()}>
+            {retrieving ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />} Retrieve Again
+          </button>
+          <button type="button" className="secondary-button" onClick={regenerateAnswer} disabled={!snapshot || retrieving || answering}>
+            {answering ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} Regenerate Answer
+          </button>
+          {evidenceUpdated && conversation.length > 0 && <span>Evidence updated; answer not regenerated.</span>}
+        </div>
+      </div>
+
+      <aside className="qa-right">
+        <div className="qa-debug-heading">
+          <div><div className="eyebrow">Retrieval debug</div><strong>{retrieval ? `${retrieval.document_ids.length} documents searched` : "No retrieval run"}</strong></div>
+          {retrieval?.query_years?.length > 0 && <span>Years {retrieval.query_years.join(", ")}</span>}
+        </div>
+        {retrieval && (
+          <>
+            <div className="stage-tabs" role="tablist" aria-label="QA retrieval stages">
+              {RETRIEVAL_STAGES.map(([id, label]) => (
+                <button type="button" role="tab" aria-selected={stage === id} className={stage === id ? "active" : ""} onClick={() => setStage(id)} key={id}>
+                  {label}<span>{retrieval[id].length}</span>
+                </button>
+              ))}
+            </div>
+            <div className="qa-retrieval-results">
+              {hits.map((hit) => <RetrievalHit hit={hit} key={hit.chunk_id} />)}
+            </div>
+          </>
+        )}
+        <section className="final-evidence">
+          <header><strong>Final evidence passed to DeepSeek</strong><span>{snapshot?.final_evidence.length ?? 0} chunks</span></header>
+          {(snapshot?.final_evidence || []).map((item) => (
+            <article key={item.chunk_id}>
+              <div><strong>[E{item.evidence_number}] {item.chunk_type}</strong><span>{item.filename} · Page {item.page}</span></div>
+              <code>{item.chunk_id}</code>
+              <pre>{item.content}</pre>
+            </article>
+          ))}
+          {!snapshot && <div className="qa-empty"><Search size={24} /><span>Ask a question to retrieve evidence.</span></div>}
+        </section>
+      </aside>
+    </section>
+  );
+}
+
 function UploadDialog({ file, busy, onCancel, onSubmit }) {
   const yearMatch = file.name.match(/\b(20\d{2})\b/);
   const [company, setCompany] = useState(file.name.match(/^(.+?)\s+(?:20\d{2}|Annual|Interim)/i)?.[1] || "");
@@ -909,7 +1081,7 @@ function App() {
             <>
               <section className="knowledge-search-header">
                 <div>
-                  <div className="eyebrow">Knowledge base retrieval</div>
+                  <div className="eyebrow">Knowledge base QA</div>
                   <h2>{selectedKnowledgeBase.name}</h2>
                 </div>
                 <div className="knowledge-search-counts">
@@ -917,10 +1089,9 @@ function App() {
                   <span><strong>{selectedKnowledgeBase.document_count}</strong> total documents</span>
                 </div>
               </section>
-              <RetrievalDebugger
+              <QAWorkspace
                 key={`knowledge-base-${selectedKnowledgeBaseId}`}
                 knowledgeBaseId={selectedKnowledgeBaseId}
-                knowledgeBaseOnly
                 onError={setError}
               />
             </>

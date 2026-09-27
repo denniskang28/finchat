@@ -513,6 +513,52 @@ tbody tr.total { background: #e9eef0; font-weight: 750; }
 .retrieval-content-grid .parent-context { grid-column: 1 / -1; border-top: 1px solid #e0e5e7; border-left: 0; }
 .retrieval-content-grid h4 { margin: 0 0 7px; color: #56646a; font-size: 10px; }
 .retrieval-content-grid pre { margin: 0; max-height: 180px; overflow: auto; color: #344249; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.qa-workspace { min-width: 0; display: grid; grid-template-columns: minmax(360px, 0.8fr) minmax(480px, 1.2fr); }
+.qa-left { min-width: 0; padding: 20px 24px 0 0; border-right: 1px solid #d7dddf; }
+.qa-right { min-width: 0; padding: 20px 0 0 24px; }
+.qa-composer > label { display: block; margin-bottom: 6px; color: #68767c; font-size: 11px; font-weight: 750; }
+.qa-composer textarea { width: 100%; min-height: 82px; padding: 11px 12px; resize: vertical; color: #26343a; background: #fff; border: 1px solid #cbd3d6; border-radius: 6px; font: 13px/1.5 inherit; }
+.qa-composer textarea:focus { outline: 0; border-color: #a94360; box-shadow: 0 0 0 2px #f6dce4; }
+.qa-composer-controls { margin-top: 10px; display: flex; justify-content: space-between; gap: 10px; }
+.qa-filters { margin-top: 10px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.qa-filters label { display: grid; gap: 5px; color: #68767c; font-size: 10px; font-weight: 700; }
+.qa-filters input { width: 100%; height: 34px; padding: 0 10px; color: #29363c; background: #fff; border: 1px solid #cbd3d6; border-radius: 5px; }
+.conversation-heading { margin-top: 22px; padding-bottom: 10px; display: flex; align-items: center; gap: 7px; color: #344249; border-bottom: 1px solid #d7dddf; font-size: 12px; }
+.conversation-heading span { margin-left: auto; color: #758289; }
+.conversation-list { max-height: calc(100vh - 410px); min-height: 260px; overflow-y: auto; }
+.conversation-turn { padding: 16px 0; border-bottom: 1px solid #dce2e4; }
+.question-bubble { padding: 10px 12px; color: #344249; background: #e9edef; border-radius: 6px; }
+.question-bubble small, .answer-block small { color: #6f7c82; font-size: 9px; font-weight: 800; text-transform: uppercase; }
+.question-bubble p, .answer-block p { margin: 5px 0 0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
+.answer-block { padding: 14px 2px 10px; }
+.answer-block.insufficient { color: #8c5b00; }
+.answer-meta { margin-top: 9px; display: flex; gap: 8px; color: #7a878d; font-size: 9px; }
+.citation-list { padding-top: 9px; border-top: 1px solid #e0e5e7; }
+.citation-list > strong { font-size: 10px; }
+.citation-list > div { margin-top: 8px; display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 2px 6px; }
+.citation-list span { color: #9f0c32; font-size: 10px; font-weight: 800; }
+.citation-list p { margin: 0; color: #4d5b61; font-size: 10px; overflow-wrap: anywhere; }
+.citation-list code { grid-column: 2; color: #7a878d; font-size: 9px; overflow-wrap: anywhere; }
+.qa-empty { min-height: 180px; display: grid; place-items: center; align-content: center; gap: 8px; color: #7a878d; font-size: 11px; }
+.qa-answer-actions { padding-top: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.qa-answer-actions > span { color: #9b6600; font-size: 9px; }
+.qa-debug-heading { min-height: 42px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.qa-debug-heading .eyebrow { margin-bottom: 3px; }
+.qa-debug-heading strong { font-size: 12px; }
+.qa-debug-heading > span { padding: 4px 6px; color: #176957; background: #e2f2ed; border-radius: 4px; font-size: 9px; font-weight: 750; }
+.qa-right .stage-tabs { margin-top: 10px; }
+.qa-retrieval-results { margin-top: 10px; max-height: 520px; display: grid; gap: 8px; overflow-y: auto; }
+.qa-retrieval-results .retrieval-hit { border-radius: 5px; }
+.final-evidence { margin-top: 20px; padding-top: 14px; border-top: 2px solid #38434d; }
+.final-evidence > header { display: flex; justify-content: space-between; gap: 12px; }
+.final-evidence > header strong { font-size: 12px; }
+.final-evidence > header span { color: #718087; font-size: 10px; }
+.final-evidence article { padding: 12px 0; border-bottom: 1px solid #dce2e4; }
+.final-evidence article > div { display: flex; justify-content: space-between; gap: 10px; }
+.final-evidence article strong { color: #344249; font-size: 10px; }
+.final-evidence article span { color: #718087; font-size: 9px; text-align: right; }
+.final-evidence article > code { display: block; margin-top: 4px; color: #8a5966; font-size: 8px; overflow-wrap: anywhere; }
+.final-evidence pre { margin: 8px 0 0; padding: 10px; max-height: 160px; overflow: auto; color: #dbe6e3; background: #20282d; border-radius: 4px; font: 9px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .empty-state { min-height: 60vh; display: grid; place-items: center; align-content: center; text-align: center; color: #69777d; }
 .empty-state h2 { margin: 14px 0 3px; color: #253239; font-size: 18px; }
 .empty-state p { margin: 0 0 18px; font-size: 13px; }
@@ -569,6 +615,10 @@ tbody tr.total { background: #e9eef0; font-weight: 750; }
   .chunk-toolbar { align-items: flex-start; padding: 12px 0; }
   .chunk-filters { justify-content: flex-end; flex-wrap: wrap; }
   .chunk-explorer { grid-template-columns: minmax(250px, 300px) minmax(0, 1fr); }
+  .qa-workspace { grid-template-columns: 1fr; }
+  .qa-left { padding-right: 0; padding-bottom: 22px; border-right: 0; border-bottom: 1px solid #d7dddf; }
+  .qa-right { padding-left: 0; }
+  .conversation-list { max-height: 520px; }
   .retrieval-query { grid-template-columns: minmax(280px, 1fr) auto; }
   .retrieval-query .secondary-button, .retrieval-query .primary-button { width: 100%; }
 }
@@ -614,4 +664,6 @@ tbody tr.total { background: #e9eef0; font-weight: 750; }
   .retrieval-content-grid section + section { border-left: 0; border-top: 1px solid #e0e5e7; }
   .retrieval-fields, .retrieval-scores { grid-template-columns: 1fr 1fr; }
   .retrieval-metadata-filters, .upload-metadata-grid { grid-template-columns: 1fr; display: grid; }
+  .qa-composer-controls { align-items: stretch; flex-direction: column; }
+  .qa-filters { grid-template-columns: 1fr; }
 }

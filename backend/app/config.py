@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_vision_model: str = "deepseek-flash"
+    deepseek_chat_model: str = "deepseek-chat"
     openai_compatible_api_key: str = ""
     openai_compatible_base_url: str = ""
     openai_compatible_vision_model: str = ""

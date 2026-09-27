@@ -359,3 +359,33 @@ class RetrievalEvaluationResponse(BaseModel):
     document_id: UUID
     results: list[GoldenQueryResult]
     metrics: dict[Literal["BASELINE", "SEMANTIC"], RetrievalMetrics]
+
+
+class QAEvidence(BaseModel):
+    evidence_number: int
+    chunk_id: UUID
+    filename: str
+    page: int
+    chunk_type: str
+    content: str
+
+
+class QARetrieveResponse(BaseModel):
+    retrieval_id: UUID
+    retrieval: RetrievalDebugResponse
+    final_evidence: list[QAEvidence]
+
+
+class QACitation(BaseModel):
+    evidence_number: int
+    filename: str
+    page: int
+    chunk_id: UUID
+
+
+class QAAnswerResponse(BaseModel):
+    retrieval_id: UUID
+    answer: str
+    insufficient_evidence: bool
+    citations: list[QACitation]
+    model: str
