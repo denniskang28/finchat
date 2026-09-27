@@ -443,7 +443,7 @@ function RetrievalHit({ hit }) {
   );
 }
 
-function RetrievalDebugger({ documentId, knowledgeBaseId, onError }) {
+function RetrievalDebugger({ documentId, knowledgeBaseId, knowledgeBaseOnly = false, onError }) {
   const [query, setQuery] = useState("2025年底AIA美国公司债有多少，占公司债组合多少？");
   const [mode, setMode] = useState("PRODUCTION");
   const [scope, setScope] = useState("KNOWLEDGE_BASE");
@@ -501,7 +501,7 @@ function RetrievalDebugger({ documentId, knowledgeBaseId, onError }) {
   const hits = result?.[stage] || [];
   return (
     <section className="retrieval-debugger">
-      <form className="retrieval-query" onSubmit={runSearch}>
+      <form className={`retrieval-query ${knowledgeBaseOnly ? "knowledge-base-query" : ""}`} onSubmit={runSearch}>
         <div className="retrieval-query-main">
           <label htmlFor="retrieval-query">Query</label>
           <div className="retrieval-query-input">
@@ -518,14 +518,16 @@ function RetrievalDebugger({ documentId, knowledgeBaseId, onError }) {
             <button type="button" key={value} className={mode === value ? "active" : ""} onClick={() => setMode(value)}>{label}</button>
           ))}
         </div>
-        <div className="mode-control" aria-label="Retrieval scope">
-          {[
-            ["DOCUMENT", "Current file"],
-            ["KNOWLEDGE_BASE", "Knowledge base"],
-          ].map(([value, label]) => (
-            <button type="button" key={value} className={scope === value ? "active" : ""} onClick={() => setScope(value)}>{label}</button>
-          ))}
-        </div>
+        {!knowledgeBaseOnly && (
+          <div className="mode-control" aria-label="Retrieval scope">
+            {[
+              ["DOCUMENT", "Current file"],
+              ["KNOWLEDGE_BASE", "Knowledge base"],
+            ].map(([value, label]) => (
+              <button type="button" key={value} className={scope === value ? "active" : ""} onClick={() => setScope(value)}>{label}</button>
+            ))}
+          </div>
+        )}
         <button type="button" className="secondary-button" onClick={buildIndex} disabled={indexing}>
           {indexing ? <LoaderCircle className="spin" size={16} /> : <Database size={16} />}
           {indexing ? "Indexing" : "Build index"}
@@ -631,6 +633,7 @@ function App() {
   const [selectedChunkId, setSelectedChunkId] = useState(null);
   const [selectedChunk, setSelectedChunk] = useState(null);
   const [chunkLoading, setChunkLoading] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState("knowledge_base");
   const [viewMode, setViewMode] = useState("tables");
   const [tableFilter, setTableFilter] = useState("pages");
   const [pageFilter, setPageFilter] = useState("all");
@@ -639,6 +642,7 @@ function App() {
   const [error, setError] = useState("");
 
   const selected = documents.find((document) => document.id === selectedId);
+  const selectedKnowledgeBase = knowledgeBases.find((knowledgeBase) => knowledgeBase.id === selectedKnowledgeBaseId);
   const statusFilteredTables = useMemo(
     () => tables.filter(TABLE_FILTERS[tableFilter].matches),
     [tables, tableFilter],
@@ -732,7 +736,10 @@ function App() {
     const hasActiveDocuments = documents.some((document) => !["READY", "FAILED"].includes(document.status));
     if (!selectedKnowledgeBaseId || !hasActiveDocuments) return undefined;
     const timer = window.setInterval(() => {
-      loadDocuments(null, selectedKnowledgeBaseId).catch((err) => setError(err.message));
+      Promise.all([
+        loadDocuments(null, selectedKnowledgeBaseId),
+        loadKnowledgeBases(),
+      ]).catch((err) => setError(err.message));
     }, 3000);
     return () => window.clearInterval(timer);
   }, [documents, selectedKnowledgeBaseId]);
@@ -763,6 +770,7 @@ function App() {
       const response = await api(`/api/knowledge-bases/${selectedKnowledgeBaseId}/documents`, { method: "POST", body });
       await loadDocuments(response.document.id, selectedKnowledgeBaseId);
       await loadKnowledgeBases();
+      setWorkspaceMode("document");
       setPendingFile(null);
     } catch (err) {
       setError(err.message);
@@ -855,13 +863,27 @@ function App() {
               <button type="button" className="icon-button" onClick={createKnowledgeBase} title="Create knowledge base" aria-label="Create knowledge base"><Plus size={16} /></button>
             </div>
           </div>
+          <button
+            type="button"
+            className={`knowledge-search-link ${workspaceMode === "knowledge_base" ? "selected" : ""}`}
+            onClick={() => setWorkspaceMode("knowledge_base")}
+          >
+            <Search size={17} />
+            <span>
+              <strong>Search all documents</strong>
+              <small>{selectedKnowledgeBase?.ready_document_count ?? 0} ready · {selectedKnowledgeBase?.document_count ?? 0} total</small>
+            </span>
+          </button>
           <div className="section-label"><Database size={15} /> Documents</div>
           <div className="document-list">
             {documents.map((document) => (
               <button
                 key={document.id}
                 className={`document-item ${selectedId === document.id ? "selected" : ""}`}
-                onClick={() => setSelectedId(document.id)}
+                onClick={() => {
+                  setSelectedId(document.id);
+                  setWorkspaceMode("document");
+                }}
               >
                 <FileText size={17} />
                 <span>
@@ -882,7 +904,26 @@ function App() {
         </aside>
 
         <main className="main-content">
-          {!selected ? (
+          {workspaceMode === "knowledge_base" && selectedKnowledgeBase ? (
+            <>
+              <section className="knowledge-search-header">
+                <div>
+                  <div className="eyebrow">Knowledge base retrieval</div>
+                  <h2>{selectedKnowledgeBase.name}</h2>
+                </div>
+                <div className="knowledge-search-counts">
+                  <span><strong>{selectedKnowledgeBase.ready_document_count}</strong> ready documents</span>
+                  <span><strong>{selectedKnowledgeBase.document_count}</strong> total documents</span>
+                </div>
+              </section>
+              <RetrievalDebugger
+                key={`knowledge-base-${selectedKnowledgeBaseId}`}
+                knowledgeBaseId={selectedKnowledgeBaseId}
+                knowledgeBaseOnly
+                onError={setError}
+              />
+            </>
+          ) : !selected ? (
             <div className="empty-state">
               <Table2 size={34} />
               <h2>No parsed document</h2>

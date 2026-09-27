@@ -29,7 +29,7 @@ docker compose up --build
 
 Select a knowledge base, upload a PDF, add finance metadata, and choose either Qwen or DeepSeek. The API stores the file and returns immediately; the worker then parses and embeds it. The UI polls the document state until it is `READY` or `FAILED`. Each document records the provider, model, and wall-clock parsing duration so equivalent uploads can be compared.
 
-Open the `Retrieval` tab, choose the current document or its knowledge base, and run a query. Baseline uses `TEXT + RAW_ROW`; Semantic uses `TEXT + TABLE_SUMMARY + SEMANTIC_ROW`; Production adds verified narrative `SECTION` and `FACT` chunks. Company and fiscal-year filters are available for knowledge-base retrieval. `Build index` queues work rather than holding an HTTP request open.
+Use `Search all documents` in the sidebar for an explicit knowledge-base-wide query, or open a document's `Retrieval` tab to compare current-file and knowledge-base scopes. Baseline uses `TEXT + RAW_ROW`; Semantic uses `TEXT + TABLE_SUMMARY + SEMANTIC_ROW`; Production adds verified narrative `SECTION` and `FACT` chunks. Company and fiscal-year filters are available for knowledge-base retrieval. `Build index` queues work rather than holding an HTTP request open.
 
 The worker is horizontally scalable because jobs are claimed with PostgreSQL `FOR UPDATE SKIP LOCKED`:
 

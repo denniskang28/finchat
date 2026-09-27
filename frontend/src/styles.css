@@ -459,6 +459,7 @@ tbody tr.total { background: #e9eef0; font-weight: 750; }
   gap: 10px;
   align-items: end;
 }
+.retrieval-query.knowledge-base-query { grid-template-columns: minmax(300px, 1fr) auto auto auto; }
 .retrieval-query-main { min-width: 0; }
 .retrieval-query-main > label { display: block; margin-bottom: 6px; color: #68767c; font-size: 11px; font-weight: 750; }
 .retrieval-query-input {
@@ -519,6 +520,31 @@ tbody tr.total { background: #e9eef0; font-weight: 750; }
 .knowledge-base-picker > div:last-child { display: grid; grid-template-columns: minmax(0, 1fr) 34px; gap: 6px; }
 .knowledge-base-picker select { width: 100%; min-width: 0; }
 .knowledge-base-picker .icon-button { width: 34px; height: 34px; }
+.knowledge-search-link {
+  width: 100%;
+  min-height: 58px;
+  margin-bottom: 18px;
+  padding: 10px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 8px;
+  color: #344249;
+  background: #f4f6f7;
+  border: 1px solid #d7dddf;
+  border-radius: 6px;
+  text-align: left;
+}
+.knowledge-search-link:hover { background: #edf1f2; }
+.knowledge-search-link.selected { color: #970b2e; background: #fbeef2; border-color: #edc3cf; }
+.knowledge-search-link span { min-width: 0; }
+.knowledge-search-link strong, .knowledge-search-link small { display: block; }
+.knowledge-search-link strong { font-size: 12px; }
+.knowledge-search-link small { margin-top: 5px; color: #77848a; font-size: 10px; }
+.knowledge-search-header { min-height: 78px; padding-bottom: 20px; display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; border-bottom: 1px solid #d7dddf; }
+.knowledge-search-header h2 { margin: 0; font-size: 21px; }
+.knowledge-search-counts { display: flex; gap: 22px; }
+.knowledge-search-counts span { color: #68767c; font-size: 11px; }
+.knowledge-search-counts strong { display: block; margin-bottom: 3px; color: #26343a; font-size: 20px; }
 .document-item .status { margin-top: 5px; font-size: 9px; }
 .dialog-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px; background: rgb(24 31 35 / 52%); }
 .upload-dialog { width: min(620px, 100%); padding: 20px; background: #fff; border: 1px solid #cfd6d9; border-radius: 8px; box-shadow: 0 18px 55px rgb(17 25 29 / 24%); }
@@ -536,6 +562,8 @@ tbody tr.total { background: #e9eef0; font-weight: 750; }
   .document-item { min-width: 220px; }
   .main-content { width: 100%; max-width: 100vw; padding: 22px 18px 48px; }
   .document-header { display: block; }
+  .knowledge-search-header { display: block; }
+  .knowledge-search-counts { margin-top: 18px; }
   .metrics { margin-top: 20px; grid-template-columns: repeat(3, minmax(64px, 1fr)); }
   .metric { min-height: 61px; }
   .chunk-toolbar { align-items: flex-start; padding: 12px 0; }
