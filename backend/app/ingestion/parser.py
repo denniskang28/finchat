@@ -10,7 +10,7 @@ from pdfplumber.page import Page
 from pdfplumber.table import Table
 
 from app.ingestion.table_quality import TableRepairPipeline
-from app.schemas import ParsedColumn, ParsedRow, ParsedTable, ParsedTableArtifact
+from app.schemas import PageContent, ParsedColumn, ParsedRow, ParsedTable, ParsedTableArtifact
 
 
 def _clean(value: object) -> str | None:
@@ -44,7 +44,7 @@ class PdfParser:
 
     def parse(
         self, pdf_path: Path, document_id: uuid.UUID
-    ) -> tuple[list[str], list[ParsedTableArtifact]]:
+    ) -> tuple[list[str], list[ParsedTableArtifact], list[PageContent]]:
         use_parallel = bool(
             self.page_workers > 1
             and self.repair_pipeline
@@ -55,52 +55,54 @@ class PdfParser:
             with pdfplumber.open(pdf_path) as pdf:
                 page_count = len(pdf.pages)
 
-            def parse_one(page_number: int) -> tuple[str, list[ParsedTableArtifact]]:
+            def parse_one(page_number: int) -> tuple[str, list[ParsedTableArtifact], PageContent]:
                 with pdfplumber.open(pdf_path) as worker_pdf:
                     page = worker_pdf.pages[page_number - 1]
                     page_text = page.extract_text(layout=True) or ""
                     raw_tables = self.parse_page(page, page_number, document_id, page_text)
-                    artifacts = self.repair_pipeline.process_page(
+                    artifacts, content = self.repair_pipeline.process_page_with_content(
                         page=page,
                         raw_tables=raw_tables,
                         document_id=document_id,
                         page_number=page_number,
                         page_title=self._page_title(page_text),
-                        footnotes=self._note_lines(page_text),
+                        footnotes=self._note_lines(page_text, page_number),
                     )
-                    return page_text.strip(), artifacts
+                    return page_text.strip(), artifacts, content
 
             with ThreadPoolExecutor(max_workers=self.page_workers) as executor:
                 results = list(executor.map(parse_one, range(1, page_count + 1)))
             return (
-                [page_text for page_text, _ in results],
-                [artifact for _, artifacts in results for artifact in artifacts],
+                [page_text for page_text, _, _ in results],
+                [artifact for _, artifacts, _ in results for artifact in artifacts],
+                [content for _, _, content in results],
             )
 
         pages: list[str] = []
         parsed_tables: list[ParsedTableArtifact] = []
+        page_contents: list[PageContent] = []
         with pdfplumber.open(pdf_path) as pdf:
             for page_number, page in enumerate(pdf.pages, start=1):
                 page_text = page.extract_text(layout=True) or ""
                 pages.append(page_text.strip())
                 raw_tables = self.parse_page(page, page_number, document_id, page_text)
                 if self.repair_pipeline:
-                    parsed_tables.extend(
-                        self.repair_pipeline.process_page(
-                            page=page,
-                            raw_tables=raw_tables,
-                            document_id=document_id,
-                            page_number=page_number,
-                            page_title=self._page_title(page_text),
-                            footnotes=self._note_lines(page_text),
-                        )
+                    artifacts, content = self.repair_pipeline.process_page_with_content(
+                        page=page,
+                        raw_tables=raw_tables,
+                        document_id=document_id,
+                        page_number=page_number,
+                        page_title=self._page_title(page_text),
+                        footnotes=self._note_lines(page_text, page_number),
                     )
+                    parsed_tables.extend(artifacts)
+                    page_contents.append(content)
                 else:
                     parsed_tables.extend(
                         ParsedTableArtifact(raw_table=table, canonical_table=table)
                         for table in raw_tables
                     )
-        return pages, parsed_tables
+        return pages, parsed_tables, page_contents
 
     def parse_page(
         self,
@@ -254,7 +256,7 @@ class PdfParser:
             context=context,
             columns=columns,
             rows=rows,
-            footnotes=self._note_lines(page_text),
+            footnotes=self._note_lines(page_text, page_number),
             extraction_method="pdfplumber.positioned_text.percentage_chart_candidate",
             parse_warnings=[
                 "Generic percentage-distribution candidate requires token-verified label association."
@@ -374,7 +376,7 @@ class PdfParser:
             context=context,
             columns=columns,
             rows=parsed_rows,
-            footnotes=self._note_lines(page_text),
+            footnotes=self._note_lines(page_text, page_number),
             extraction_method="pdfplumber.lines.generic",
             parse_warnings=[
                 "Generic header inference was used; verify merged headers, units, and table title in the debug UI."
@@ -416,7 +418,7 @@ class PdfParser:
         return "Untitled table"
 
     @staticmethod
-    def _note_lines(page_text: str) -> list[str]:
+    def _note_lines(page_text: str, page_number: int | None = None) -> list[str]:
         notes: list[str] = []
         capture = False
         for line in page_text.splitlines():
@@ -426,7 +428,15 @@ class PdfParser:
             if cleaned.startswith(("Note:", "Notes:")):
                 capture = True
             if capture or re.match(r"^\(\d+\)", cleaned):
-                notes.append(cleaned)
+                parts = [
+                    part.strip()
+                    for part in re.split(r"(?=\(\d+\)\s)", cleaned)
+                    if part.strip()
+                ]
+                for part in parts:
+                    if page_number is not None:
+                        part = re.sub(rf"\s+{page_number}$", "", part).strip()
+                    notes.append(part)
         return notes
 
 

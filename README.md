@@ -1,15 +1,16 @@
 # Semantic Table RAG POC
 
-This repository implements PDF ingestion, table extraction, evidence-backed table repair, and table-representation inspection. It does not implement embeddings, retrieval, reranking, or answer generation.
+This repository implements PDF ingestion, layout-aware content extraction, table extraction, evidence-backed repair, and chunk inspection. It does not implement embeddings, retrieval, reranking, or answer generation.
 
 Every page uses the same LLM-primary, evidence-verified pipeline; there are no page-number or document-specific parser branches:
 
 1. `pdfplumber` extracts native text, coordinates, source tokens, and a raw table baseline.
-2. A configurable multimodal provider identifies every table and data chart on the complete page.
-3. Every LLM header, unit, context note, and cell must map back to exact PDF tokens before it is accepted.
+2. A configurable multimodal provider identifies tables, data charts, narrative sections, KPI facts, and qualitative callouts on the complete page.
+3. Every LLM heading, fact, header, unit, context note, and cell must map back to PDF tokens before it is accepted. Numeric evidence always requires an exact match.
 4. Numeric signs, punctuation, footnote markers, row geometry, and inferred chart units are validated deterministically.
 5. A rejected or unavailable page-level result falls back to the existing `pdfplumber` extraction and evidence-backed table repair pipeline, with the reason shown in debug warnings.
 6. Raw extraction and canonical LLM structures remain available side by side in the debug UI.
+7. Each page emits a hierarchy of `PAGE_SUMMARY`, `SECTION`, and `FACT` chunks. Important-token coverage exposes headings and numbers that were not assigned to any accepted structure.
 
 ## Run
 

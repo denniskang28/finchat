@@ -112,10 +112,11 @@ class Chunk(BaseModel):
     document_id: UUID
     page_number: int
     chunk_type: Literal[
-        "TEXT", "TABLE_SUMMARY", "TABLE_ROW", "TABLE_MARKDOWN", "CHART_SERIES"
+        "TEXT", "PAGE_SUMMARY", "SECTION", "FACT", "TABLE_SUMMARY",
+        "TABLE_ROW", "TABLE_MARKDOWN", "CHART_SERIES"
     ]
     representation: Literal[
-        "TEXT", "RAW_ROW", "MARKDOWN", "SEMANTIC_ROW", "SUMMARY"
+        "TEXT", "RAW_ROW", "MARKDOWN", "SEMANTIC", "SEMANTIC_ROW", "SUMMARY"
     ]
     comparison_key: str | None       # same key for raw/semantic logical row
     content: str                     # the text indexed in this representation
@@ -185,10 +186,11 @@ CREATE TABLE chunks (
     document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     page_number INTEGER NOT NULL CHECK (page_number > 0),
     chunk_type TEXT NOT NULL CHECK (chunk_type IN (
-        'TEXT', 'TABLE_SUMMARY', 'TABLE_ROW', 'TABLE_MARKDOWN', 'CHART_SERIES'
+        'TEXT', 'PAGE_SUMMARY', 'SECTION', 'FACT', 'TABLE_SUMMARY',
+        'TABLE_ROW', 'TABLE_MARKDOWN', 'CHART_SERIES'
     )),
     representation TEXT NOT NULL CHECK (representation IN (
-        'TEXT', 'RAW_ROW', 'MARKDOWN', 'SEMANTIC_ROW', 'SUMMARY'
+        'TEXT', 'RAW_ROW', 'MARKDOWN', 'SEMANTIC', 'SEMANTIC_ROW', 'SUMMARY'
     )),
     comparison_key TEXT,
     content TEXT NOT NULL,

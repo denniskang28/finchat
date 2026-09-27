@@ -1,18 +1,24 @@
 import base64
 import io
 import re
+from collections import Counter
 from threading import Lock
 
 from pdfplumber.page import Page
 
 from app.ingestion.repair_providers import (
     ChartExtractionProposal,
+    ContentSectionProposal,
     EvidenceValue,
     PageStructureProposal,
     TableReconstructionProposal,
     TableRepairProvider,
 )
 from app.schemas import (
+    ContentCoverage,
+    ContentFact,
+    ContentSection,
+    PageContent,
     ParsedColumn,
     ParsedRow,
     ParsedTable,
@@ -21,6 +27,7 @@ from app.schemas import (
     TableIssue,
     TableQuality,
     TableRepair,
+    UncoveredToken,
 )
 
 
@@ -290,22 +297,31 @@ def _render_table_image(page: Page, table: ParsedTable) -> str:
 
 
 def extract_page_tokens(page: Page, page_number: int) -> list[SourceToken]:
-    return [
-        SourceToken(
-            token_id=f"p{page_number}w{index}",
-            text=str(word["text"]),
-            bbox=(
-                float(word["x0"]),
-                float(word["top"]),
-                float(word["x1"]),
-                float(word["bottom"]),
-            ),
+    words = page.extract_words(x_tolerance=2, y_tolerance=2, keep_blank_chars=False)
+    chars = page.chars
+    tokens = []
+    for index, word in enumerate(words, start=1):
+        sizes = [
+            float(char["size"])
+            for char in chars
+            if float(word["x0"]) <= (float(char["x0"]) + float(char["x1"])) / 2 <= float(word["x1"])
+            and float(word["top"]) <= (float(char["top"]) + float(char["bottom"])) / 2 <= float(word["bottom"])
+            and char.get("size") is not None
+        ]
+        tokens.append(
+            SourceToken(
+                token_id=f"p{page_number}w{index}",
+                text=str(word["text"]),
+                bbox=(
+                    float(word["x0"]),
+                    float(word["top"]),
+                    float(word["x1"]),
+                    float(word["bottom"]),
+                ),
+                font_size=max(sizes) if sizes else None,
+            )
         )
-        for index, word in enumerate(
-            page.extract_words(x_tolerance=2, y_tolerance=2, keep_blank_chars=False),
-            start=1,
-        )
-    ]
+    return tokens
 
 
 def _render_page_image(page: Page) -> str:
@@ -567,6 +583,285 @@ def _validated_page_structure(
         rows=rows,
         footnotes=footnotes,
         extraction_method="llm.page_structure+pdfplumber.token_verified",
+    )
+
+
+def _proposal_token_ids(value: object) -> set[str]:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="python")
+    if isinstance(value, dict):
+        found = set(value.get("source_token_ids", []))
+        for child in value.values():
+            found.update(_proposal_token_ids(child))
+        return found
+    if isinstance(value, list):
+        found: set[str] = set()
+        for child in value:
+            found.update(_proposal_token_ids(child))
+        return found
+    return set()
+
+
+def _content_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return slug[:80] or "content"
+
+
+def _validated_content_section(
+    *,
+    proposal: ContentSectionProposal,
+    tokens: list[SourceToken],
+    page_number: int,
+    section_index: int,
+    footnotes: list[str],
+) -> ContentSection:
+    token_map = {token.token_id: token for token in tokens}
+
+    def evidence(
+        value: EvidenceValue, *, allow_visual_heading: bool = False
+    ) -> tuple[str, list[SourceToken]]:
+        if not value.value.strip() or not value.source_token_ids:
+            raise ValueError(f"content value has no source evidence: {value.value}")
+        if len(set(value.source_token_ids)) != len(value.source_token_ids):
+            raise ValueError(f"content value repeats source token ids: {value.value}")
+        if any(token_id not in token_map for token_id in value.source_token_ids):
+            raise ValueError(f"content value cites an unknown source token: {value.value}")
+        selected = _reading_order([token_map[token_id] for token_id in value.source_token_ids])
+        source_text = " ".join(token.text for token in selected)
+        exact_match = _exact_text(source_text) == _exact_text(value.value)
+        source_chars = Counter(_normalized(source_text))
+        heading_chars = Counter(_normalized(value.value))
+        character_overlap = (
+            sum((source_chars & heading_chars).values()) / sum(heading_chars.values())
+            if heading_chars
+            else 0.0
+        )
+        visually_grounded_heading = bool(
+            allow_visual_heading
+            and re.search(r"[A-Za-z]", value.value)
+            and not re.search(r"\d", value.value)
+            and not re.search(r"\d", source_text)
+            and character_overlap >= 0.7
+        )
+        if not exact_match and not visually_grounded_heading:
+            raise ValueError(f"content value differs from source tokens: {value.value}")
+        verified_text = value.value if visually_grounded_heading else source_text
+        return verified_text.replace("\u2013", "-").replace("\u2014", "-"), selected
+
+    heading_values = [
+        evidence(heading, allow_visual_heading=True) for heading in proposal.heading_path
+    ]
+    heading_path = [value for value, _ in heading_values]
+    heading = " > ".join(heading_path)
+    section_id = f"p{page_number}_section{section_index}_{_content_slug(heading_path[-1])}"
+    all_tokens = [token for _, selected in heading_values for token in selected]
+    facts: list[ContentFact] = []
+    raw_lines = [heading]
+    for fact_index, proposed_fact in enumerate(proposal.facts, start=1):
+        label, label_tokens = evidence(proposed_fact.label)
+        value = None
+        value_tokens: list[SourceToken] = []
+        if proposed_fact.value is not None:
+            value, value_tokens = evidence(proposed_fact.value)
+        fact_tokens = [*label_tokens, *value_tokens]
+        all_tokens.extend(fact_tokens)
+        marker_text = f"{label} {value or ''}"
+        markers = re.findall(r"\((\d+)\)", marker_text)
+        matching_notes = [
+            note for note in footnotes if any(note.startswith(f"({marker})") for marker in markers)
+        ]
+        sentence = f"Page {page_number}. Section: {heading}. {label}"
+        if value:
+            sentence += f": {value}"
+        sentence += "."
+        if matching_notes:
+            sentence += " " + " ".join(f"Note: {note}" for note in matching_notes)
+        fact_id = f"{section_id}_fact{fact_index}_{_content_slug(label)}"
+        facts.append(
+            ContentFact(
+                fact_id=fact_id,
+                label=label,
+                value=value,
+                content=sentence,
+                source_token_ids=[token.token_id for token in fact_tokens],
+                bbox=(
+                    min(token.bbox[0] for token in fact_tokens),
+                    min(token.bbox[1] for token in fact_tokens),
+                    max(token.bbox[2] for token in fact_tokens),
+                    max(token.bbox[3] for token in fact_tokens),
+                ),
+                footnotes=matching_notes,
+            )
+        )
+        raw_lines.append(f"{label}{f' | {value}' if value else ''}")
+
+    merged_facts: list[ContentFact] = []
+    for fact in facts:
+        previous = merged_facts[-1] if merged_facts else None
+        if previous is not None and previous.value and fact.value is None:
+            vertical_gap = fact.bbox[1] - previous.bbox[3]
+            horizontal_overlap = max(
+                0.0,
+                min(previous.bbox[2], fact.bbox[2]) - max(previous.bbox[0], fact.bbox[0]),
+            )
+            narrower_width = max(
+                1.0,
+                min(previous.bbox[2] - previous.bbox[0], fact.bbox[2] - fact.bbox[0]),
+            )
+            if -4.0 <= vertical_gap <= 14.0 and horizontal_overlap / narrower_width >= 0.5:
+                previous.label = f"{previous.label} - {fact.label}"
+                previous.source_token_ids = [
+                    *previous.source_token_ids,
+                    *fact.source_token_ids,
+                ]
+                previous.bbox = (
+                    min(previous.bbox[0], fact.bbox[0]),
+                    min(previous.bbox[1], fact.bbox[1]),
+                    max(previous.bbox[2], fact.bbox[2]),
+                    max(previous.bbox[3], fact.bbox[3]),
+                )
+                previous.footnotes = list(dict.fromkeys([*previous.footnotes, *fact.footnotes]))
+                continue
+        merged_facts.append(fact)
+    facts = merged_facts
+    for fact_index, fact in enumerate(facts, start=1):
+        fact.fact_id = f"{section_id}_fact{fact_index}_{_content_slug(fact.label)}"
+        fact.content = f"Page {page_number}. Section: {heading}. {fact.label}"
+        if fact.value:
+            fact.content += f": {fact.value}"
+        fact.content += "."
+        if fact.footnotes:
+            fact.content += " " + " ".join(f"Note: {note}" for note in fact.footnotes)
+    if not all_tokens:
+        raise ValueError("content section has no token-backed geometry")
+    content_lines = [f"Page {page_number}. Section: {heading}."]
+    content_lines.extend(
+        f"{fact.label}{f': {fact.value}' if fact.value else ''}." for fact in facts
+    )
+    return ContentSection(
+        section_id=section_id,
+        page_number=page_number,
+        heading_path=heading_path,
+        content="\n".join(content_lines),
+        raw_content="\n".join(raw_lines),
+        source_token_ids=sorted({token.token_id for token in all_tokens}),
+        bbox=(
+            min(token.bbox[0] for token in all_tokens),
+            min(token.bbox[1] for token in all_tokens),
+            max(token.bbox[2] for token in all_tokens),
+            max(token.bbox[3] for token in all_tokens),
+        ),
+        facts=facts,
+    )
+
+
+def _build_page_content(
+    *,
+    page_number: int,
+    page_title: str,
+    page_height: float,
+    tokens: list[SourceToken],
+    section_proposals: list[ContentSectionProposal],
+    table_artifacts: list[ParsedTableArtifact],
+    accepted_structure_token_ids: set[str],
+    footnotes: list[str],
+    parse_warnings: list[str],
+) -> PageContent:
+    sections: list[ContentSection] = []
+    warnings = list(parse_warnings)
+    for index, proposal in enumerate(section_proposals, start=1):
+        try:
+            section = _validated_content_section(
+                proposal=proposal,
+                tokens=tokens,
+                page_number=page_number,
+                section_index=index,
+                footnotes=footnotes,
+            )
+            # Page titles and subtitles already belong to PAGE_SUMMARY. Keeping a
+            # section wholly inside the title band creates duplicate retrieval hits.
+            if section.bbox[3] <= page_height * 0.18:
+                continue
+            sections.append(section)
+        except ValueError as exc:
+            warnings.append(f"content section {index} rejected: {exc}")
+
+    covered_token_ids = set(accepted_structure_token_ids)
+    for section in sections:
+        covered_token_ids.update(section.source_token_ids)
+    for artifact in table_artifacts:
+        x0, y0, x1, y1 = artifact.canonical_table.bbox
+        covered_token_ids.update(
+            token.token_id
+            for token in tokens
+            if x0 <= (token.bbox[0] + token.bbox[2]) / 2 <= x1
+            and y0 <= (token.bbox[1] + token.bbox[3]) / 2 <= y1
+        )
+    top_context_tokens = _reading_order(
+        [token for token in tokens if token.bbox[3] <= page_height * 0.18]
+    )
+    covered_token_ids.update(token.token_id for token in top_context_tokens)
+
+    sizes = sorted(token.font_size for token in tokens if token.font_size is not None)
+    median_size = sizes[len(sizes) // 2] if sizes else 0.0
+    prominence_threshold = max(median_size * 1.35, median_size + 2.0)
+    important: list[tuple[SourceToken, str]] = []
+    for token in tokens:
+        if token.bbox[1] >= page_height * 0.90:
+            continue
+        numeric = bool(re.search(r"\d", token.text)) and not re.fullmatch(r"\(\d+\)", token.text)
+        prominent = bool(
+            token.font_size is not None
+            and token.font_size >= prominence_threshold
+            and re.search(r"[A-Za-z]", token.text)
+        )
+        if numeric or prominent:
+            important.append((token, "NUMERIC" if numeric else "PROMINENT_TEXT"))
+    uncovered = [
+        UncoveredToken(
+            token_id=token.token_id,
+            text=token.text,
+            bbox=token.bbox,
+            reason=reason,
+        )
+        for token, reason in important
+        if token.token_id not in covered_token_ids
+    ]
+    covered_count = len(important) - len(uncovered)
+    ratio = covered_count / len(important) if important else 1.0
+    coverage_warnings = []
+    uncovered_numeric = sum(token.reason == "NUMERIC" for token in uncovered)
+    if uncovered_numeric:
+        coverage_warnings.append(f"{uncovered_numeric} important numeric tokens are not assigned to a structure or content fact.")
+    if ratio < 0.8:
+        coverage_warnings.append(f"Important-token coverage is {ratio:.0%}, below the 80% review threshold.")
+
+    section_summaries = []
+    for section in sections:
+        facts = "; ".join(
+            f"{fact.label}{f': {fact.value}' if fact.value else ''}" for fact in section.facts
+        )
+        section_summaries.append(f"{' > '.join(section.heading_path)}: {facts}")
+    table_titles = [artifact.canonical_table.title for artifact in table_artifacts]
+    top_context = " ".join(token.text for token in top_context_tokens)
+    summary_parts = [f"Page {page_number}: {top_context or page_title}."]
+    if section_summaries:
+        summary_parts.append("Sections and key facts: " + " | ".join(section_summaries) + ".")
+    if table_titles:
+        summary_parts.append("Tables and charts: " + " | ".join(table_titles) + ".")
+    return PageContent(
+        page_number=page_number,
+        title=page_title,
+        summary=" ".join(summary_parts),
+        sections=sections,
+        coverage=ContentCoverage(
+            important_token_count=len(important),
+            covered_important_token_count=covered_count,
+            coverage_ratio=round(ratio, 4),
+            uncovered_tokens=uncovered[:100],
+            warnings=coverage_warnings,
+        ),
+        parse_warnings=warnings,
     )
 
 
@@ -1220,10 +1515,41 @@ class TableRepairPipeline:
         page_title: str,
         footnotes: list[str],
     ) -> list[ParsedTableArtifact]:
-        if not self.llm_primary or not self.provider.available:
-            return [self.process(page, table) for table in raw_tables]
+        artifacts, _ = self.process_page_with_content(
+            page=page,
+            raw_tables=raw_tables,
+            document_id=document_id,
+            page_number=page_number,
+            page_title=page_title,
+            footnotes=footnotes,
+        )
+        return artifacts
 
+    def process_page_with_content(
+        self,
+        *,
+        page: Page,
+        raw_tables: list[ParsedTable],
+        document_id: object,
+        page_number: int,
+        page_title: str,
+        footnotes: list[str],
+    ) -> tuple[list[ParsedTableArtifact], PageContent]:
         tokens = extract_page_tokens(page, page_number)
+        if not self.llm_primary or not self.provider.available:
+            artifacts = [self.process(page, table) for table in raw_tables]
+            return artifacts, _build_page_content(
+                page_number=page_number,
+                page_title=page_title,
+                page_height=float(page.height),
+                tokens=tokens,
+                section_proposals=[],
+                table_artifacts=artifacts,
+                accepted_structure_token_ids=set(),
+                footnotes=footnotes,
+                parse_warnings=["Content-section extraction was unavailable; only deterministic structures were used."],
+            )
+
         failure_messages: list[str] = []
         try:
             response = self.provider.propose_page_structures(
@@ -1235,9 +1561,13 @@ class TableRepairPipeline:
             )
         except Exception as exc:
             response = None
-            failure_messages.append(f"provider request failed: {type(exc).__name__}")
+            detail = str(exc).strip()
+            failure_messages.append(
+                f"provider request failed: {type(exc).__name__}{f': {detail}' if detail else ''}"
+            )
 
         validated: list[tuple[ParsedTable, float]] = []
+        accepted_structure_token_ids: set[str] = set()
         if response is not None:
             kind_counts = {"TABLE": 0, "CHART": 0}
             for index, proposal in enumerate(response.structures, start=1):
@@ -1255,6 +1585,7 @@ class TableRepairPipeline:
                         footnotes=footnotes,
                     )
                     validated.append((table, proposal.confidence))
+                    accepted_structure_token_ids.update(_proposal_token_ids(proposal))
                 except ValueError as exc:
                     failure_messages.append(f"structure {index} rejected: {exc}")
 
@@ -1309,13 +1640,25 @@ class TableRepairPipeline:
                     f"LLM-primary fallback: {fallback_reason}."
                 )
             artifacts.append(artifact)
-        return sorted(
+        sorted_artifacts = sorted(
             artifacts,
             key=lambda artifact: (
                 artifact.canonical_table.bbox[1],
                 artifact.canonical_table.bbox[0],
             ),
         )
+        content = _build_page_content(
+            page_number=page_number,
+            page_title=page_title,
+            page_height=float(page.height),
+            tokens=tokens,
+            section_proposals=response.content_sections if response is not None else [],
+            table_artifacts=sorted_artifacts,
+            accepted_structure_token_ids=accepted_structure_token_ids,
+            footnotes=footnotes,
+            parse_warnings=failure_messages,
+        )
+        return sorted_artifacts, content
 
     def process(self, page: Page, raw_table: ParsedTable) -> ParsedTableArtifact:
         canonical = raw_table.model_copy(deep=True)

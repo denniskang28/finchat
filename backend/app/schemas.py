@@ -49,6 +49,52 @@ class SourceToken(BaseModel):
     token_id: str
     text: str
     bbox: tuple[float, float, float, float]
+    font_size: float | None = None
+
+
+class ContentFact(BaseModel):
+    fact_id: str
+    label: str
+    value: str | None = None
+    content: str
+    source_token_ids: list[str]
+    bbox: tuple[float, float, float, float]
+    footnotes: list[str] = Field(default_factory=list)
+
+
+class ContentSection(BaseModel):
+    section_id: str
+    page_number: int
+    heading_path: list[str]
+    content: str
+    raw_content: str
+    source_token_ids: list[str]
+    bbox: tuple[float, float, float, float]
+    facts: list[ContentFact] = Field(default_factory=list)
+
+
+class UncoveredToken(BaseModel):
+    token_id: str
+    text: str
+    bbox: tuple[float, float, float, float]
+    reason: Literal["NUMERIC", "PROMINENT_TEXT"]
+
+
+class ContentCoverage(BaseModel):
+    important_token_count: int
+    covered_important_token_count: int
+    coverage_ratio: float = Field(ge=0.0, le=1.0)
+    uncovered_tokens: list[UncoveredToken] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class PageContent(BaseModel):
+    page_number: int
+    title: str
+    summary: str
+    sections: list[ContentSection] = Field(default_factory=list)
+    coverage: ContentCoverage
+    parse_warnings: list[str] = Field(default_factory=list)
 
 
 class TableIssue(BaseModel):

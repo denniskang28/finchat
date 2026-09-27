@@ -130,6 +130,7 @@ button:disabled { cursor: wait; opacity: 0.72; }
 .status.pending { color: #9b6600; }
 .document-status-line { display: flex; align-items: center; gap: 13px; flex-wrap: wrap; }
 .document-status-line > span:not(.status) { display: inline-flex; align-items: center; gap: 5px; color: #68767c; font-size: 11px; }
+.document-status-line > span.coverage-alert { color: #9b5d00; }
 .metrics { display: grid; grid-template-columns: repeat(6, 78px); align-items: start; }
 .metric {
   min-width: 0;

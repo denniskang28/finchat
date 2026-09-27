@@ -93,8 +93,21 @@ class PageStructureProposal(BaseModel):
         return [] if value is None else value
 
 
+class ContentFactProposal(BaseModel):
+    label: EvidenceValue
+    value: EvidenceValue | None = None
+
+
+class ContentSectionProposal(BaseModel):
+    heading_path: list[EvidenceValue] = Field(min_length=1)
+    facts: list[ContentFactProposal] = Field(min_length=1)
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class PageStructureResponse(BaseModel):
     structures: list[PageStructureProposal] = Field(default_factory=list)
+    content_sections: list[ContentSectionProposal] = Field(default_factory=list)
 
 
 class TableRepairProvider(ABC):
@@ -309,9 +322,10 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
         image_data_url: str,
     ) -> PageStructureResponse | None:
         prompt = {
-            "task": "Identify and reconstruct every financial table and data chart on this complete PDF page.",
+            "task": "Identify every financial table and data chart, and organize all other decision-relevant page content into evidence-backed sections and facts.",
             "constraints": [
-                "Return JSON only with a top-level structures array; use an empty array when the page has no financial table or data chart.",
+                "Return JSON only with top-level structures and content_sections arrays.",
+                "Use an empty structures array when the page has no financial table or data chart, but still extract narrative sections and KPI facts.",
                 "Separate adjacent tables, charts, and narrative panels into distinct structures.",
                 "Do not turn prose-only callouts, footnotes, page numbers, or decorative content into rows.",
                 "Every visible title, header, unit, context note, and non-empty cell must cite the exact source_token_ids that spell it.",
@@ -321,6 +335,12 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
                 "Put units such as ($b), %, or US$m in the column unit field; never return a unit as a data row.",
                 "For charts, return the visible series as rows and use source_kind CHART.",
                 "Context must be short, directly relevant evidence from the same page; omit unrelated narrative.",
+                "For content_sections, create one section per visual topic or panel and return its visible heading hierarchy in heading_path.",
+                "Represent KPI cards as facts with an exact label and exact value. Represent qualitative bullets as facts with a label and null value.",
+                "Keep each KPI atomic: include its descriptor and adjacent qualifier in one fact label; do not emit the qualifier as a separate null-valued fact.",
+                "Do not repeat table or chart rows in content_sections unless the same content is also needed to make a surrounding narrative panel independently understandable.",
+                "Every content heading, fact label, and fact value must cite the exact source_token_ids that spell it.",
+                "Do not include sources, footnotes, page numbers, logos, or decorative labels as standalone content sections.",
                 "Do not infer, calculate, correct, or invent values that are not present in the supplied tokens.",
             ],
             "page": {
@@ -363,6 +383,26 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
                         "reason": "Short structural explanation",
                         "confidence": 0.99,
                     }
+                ],
+                "content_sections": [
+                    {
+                        "heading_path": [
+                            {"value": "Exact panel heading", "source_token_ids": ["p1w10"]},
+                            {"value": "Exact topic heading", "source_token_ids": ["p1w11"]}
+                        ],
+                        "facts": [
+                            {
+                                "label": {"value": "Exact visible fact label", "source_token_ids": ["p1w12"]},
+                                "value": {"value": "Exact visible value", "source_token_ids": ["p1w13"]}
+                            },
+                            {
+                                "label": {"value": "Exact qualitative bullet", "source_token_ids": ["p1w14"]},
+                                "value": None
+                            }
+                        ],
+                        "reason": "Short grouping explanation",
+                        "confidence": 0.99
+                    }
                 ]
             },
         }
@@ -404,7 +444,16 @@ class OpenAICompatibleVisionProvider(TableRepairProvider):
                 structures.append(PageStructureProposal.model_validate(candidate))
             except ValidationError:
                 continue
-        return PageStructureResponse(structures=structures)
+        content_sections = []
+        for candidate in payload.get("content_sections", []):
+            try:
+                content_sections.append(ContentSectionProposal.model_validate(candidate))
+            except ValidationError:
+                continue
+        return PageStructureResponse(
+            structures=structures,
+            content_sections=content_sections,
+        )
 
     def propose_reconstruction(
         self,

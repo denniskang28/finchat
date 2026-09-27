@@ -12,6 +12,7 @@ import {
   LoaderCircle,
   RefreshCw,
   Search,
+  ScanSearch,
   ShieldCheck,
   Table2,
   Upload,
@@ -615,6 +616,14 @@ function App() {
                     )}
                     {selected.metadata.parse_duration_seconds != null && (
                       <span><Clock3 size={13} /> {formatDuration(selected.metadata.parse_duration_seconds)}</span>
+                    )}
+                    {selected.metadata.content_coverage != null && (
+                      <span className={(selected.metadata.low_content_coverage_pages?.length ?? 0) > 0 ? "coverage-alert" : ""}>
+                        <ScanSearch size={13} />
+                        {Math.round(selected.metadata.content_coverage * 100)}% content coverage
+                        {(selected.metadata.low_content_coverage_pages?.length ?? 0) > 0
+                          && ` · ${selected.metadata.low_content_coverage_pages.length} flagged pages`}
+                      </span>
                     )}
                   </div>
                 </div>

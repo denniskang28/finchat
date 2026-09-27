@@ -54,7 +54,9 @@ class IngestionService:
 
         try:
             parse_started_at = time.perf_counter()
-            pages, tables = await asyncio.to_thread(self.parser.parse, stored_path, document_id)
+            pages, tables, page_contents = await asyncio.to_thread(
+                self.parser.parse, stored_path, document_id
+            )
             parse_duration_seconds = time.perf_counter() - parse_started_at
             for page_number, page_text in enumerate(pages, start=1):
                 session.add(
@@ -69,6 +71,83 @@ class IngestionService:
                         metadata_json={"element_type": "TEXT", "page": page_number},
                     )
                 )
+
+            content_section_count = 0
+            content_fact_count = 0
+            content_warning_count = 0
+            low_coverage_pages: list[int] = []
+            coverage_total = 0.0
+            for page_content in page_contents:
+                coverage = page_content.coverage
+                coverage_total += coverage.coverage_ratio
+                content_warning_count += len(page_content.parse_warnings) + len(coverage.warnings)
+                if coverage.coverage_ratio < 0.8 or coverage.warnings:
+                    low_coverage_pages.append(page_content.page_number)
+                session.add(
+                    Chunk(
+                        document_id=document_id,
+                        page_number=page_content.page_number,
+                        chunk_type="PAGE_SUMMARY",
+                        representation="SEMANTIC",
+                        comparison_key=f"p{page_content.page_number}:summary",
+                        content=page_content.summary,
+                        raw_content=pages[page_content.page_number - 1],
+                        semantic_content=page_content.summary,
+                        metadata_json={
+                            "element_type": "PAGE_SUMMARY",
+                            "title": page_content.title,
+                            "section_count": len(page_content.sections),
+                            "coverage": coverage.model_dump(mode="json"),
+                            "parse_warnings": page_content.parse_warnings,
+                        },
+                    )
+                )
+                for section in page_content.sections:
+                    content_section_count += 1
+                    session.add(
+                        Chunk(
+                            document_id=document_id,
+                            page_number=page_content.page_number,
+                            chunk_type="SECTION",
+                            representation="SEMANTIC",
+                            comparison_key=section.section_id,
+                            content=section.content,
+                            raw_content=section.raw_content,
+                            semantic_content=section.content,
+                            metadata_json={
+                                "element_type": "SECTION",
+                                "heading_path": section.heading_path,
+                                "bbox": section.bbox,
+                                "source_token_ids": section.source_token_ids,
+                                "parent_key": f"p{page_content.page_number}:summary",
+                                "fact_count": len(section.facts),
+                            },
+                        )
+                    )
+                    for fact in section.facts:
+                        content_fact_count += 1
+                        session.add(
+                            Chunk(
+                                document_id=document_id,
+                                page_number=page_content.page_number,
+                                chunk_type="FACT",
+                                representation="SEMANTIC",
+                                comparison_key=fact.fact_id,
+                                content=fact.content,
+                                raw_content=f"{fact.label}{f' | {fact.value}' if fact.value else ''}",
+                                semantic_content=fact.content,
+                                metadata_json={
+                                    "element_type": "FACT",
+                                    "label": fact.label,
+                                    "value": fact.value,
+                                    "bbox": fact.bbox,
+                                    "source_token_ids": fact.source_token_ids,
+                                    "footnotes": fact.footnotes,
+                                    "parent_key": section.section_id,
+                                    "page_summary_key": f"p{page_content.page_number}:summary",
+                                },
+                            )
+                        )
 
             raw_row_count = 0
             semantic_row_count = 0
@@ -165,7 +244,13 @@ class IngestionService:
                 "tables": len(tables),
                 "raw_rows": raw_row_count,
                 "semantic_rows": semantic_row_count,
-                "parse_warnings": warning_count,
+                "parse_warnings": warning_count + content_warning_count,
+                "table_parse_warnings": warning_count,
+                "content_parse_warnings": content_warning_count,
+                "content_sections": content_section_count,
+                "content_facts": content_fact_count,
+                "content_coverage": round(coverage_total / len(page_contents), 4) if page_contents else 0.0,
+                "low_content_coverage_pages": low_coverage_pages,
                 "table_repairs": repair_count,
                 "repaired_tables": repaired_table_count,
                 "needs_review_tables": review_table_count,
