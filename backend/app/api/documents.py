@@ -10,6 +10,7 @@ from app.models import Chunk, Document
 from app.schemas import (
     ChunkDetail,
     ChunkSummary,
+    DocumentMetadataUpdate,
     DocumentSummary,
     PageText,
     TableDebug,
@@ -23,10 +24,15 @@ router = APIRouter(prefix="/api/documents", tags=["documents"])
 def _document_response(document: Document) -> dict:
     return {
         "id": document.id,
+        "knowledge_base_id": document.knowledge_base_id,
         "filename": document.filename,
         "title": document.title,
         "status": document.status,
         "page_count": document.page_count,
+        "company": document.company,
+        "fiscal_year": document.fiscal_year,
+        "document_type": document.document_type,
+        "language": document.language,
         "metadata": document.metadata_json,
         "created_at": document.created_at,
     }
@@ -63,6 +69,20 @@ async def _get_document(document_id: UUID, session: AsyncSession) -> Document:
 @router.get("/{document_id}", response_model=DocumentSummary)
 async def get_document(document_id: UUID, session: AsyncSession = Depends(get_session)) -> dict:
     return _document_response(await _get_document(document_id, session))
+
+
+@router.patch("/{document_id}/metadata", response_model=DocumentSummary)
+async def update_document_metadata(
+    document_id: UUID,
+    request: DocumentMetadataUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    document = await _get_document(document_id, session)
+    for field, value in request.model_dump(exclude_unset=True).items():
+        setattr(document, field, value.strip() if isinstance(value, str) else value)
+    await session.commit()
+    await session.refresh(document)
+    return _document_response(document)
 
 
 @router.get("/{document_id}/tables", response_model=list[TableDebug])

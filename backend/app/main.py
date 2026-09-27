@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.documents import router as documents_router
+from app.api.knowledge_bases import jobs_router, router as knowledge_bases_router
 from app.api.retrieval import router as retrieval_router
 from app.config import get_settings
 from app.db import init_db
@@ -33,6 +34,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(documents_router)
+app.include_router(knowledge_bases_router)
+app.include_router(jobs_router)
 app.include_router(retrieval_router)
 
 

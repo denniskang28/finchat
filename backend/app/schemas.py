@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ParsedColumn(BaseModel):
@@ -165,16 +165,69 @@ class DocumentSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    knowledge_base_id: UUID | None = None
     filename: str
     title: str | None
     status: str
     page_count: int | None
+    company: str | None = None
+    fiscal_year: int | None = None
+    document_type: str | None = None
+    language: str | None = None
     metadata: dict[str, Any]
     created_at: datetime
 
 
 class UploadResponse(DocumentSummary):
     pass
+
+
+class DocumentMetadataUpdate(BaseModel):
+    company: str | None = Field(default=None, max_length=200)
+    fiscal_year: int | None = Field(default=None, ge=1900, le=2200)
+    document_type: str | None = Field(default=None, max_length=50)
+    language: str | None = Field(default=None, max_length=20)
+
+
+class KnowledgeBaseCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class KnowledgeBaseSummary(BaseModel):
+    id: UUID
+    name: str
+    description: str | None
+    document_count: int = 0
+    ready_document_count: int = 0
+    created_at: datetime
+
+
+class IngestionJobSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    document_id: UUID
+    status: str
+    stage: str
+    progress: int
+    attempts: int
+    error: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class AsyncUploadResponse(BaseModel):
+    document: DocumentSummary
+    job: IngestionJobSummary
+
+
+class BulkIndexResponse(BaseModel):
+    knowledge_base_id: UUID
+    queued_jobs: int
+    skipped_active_jobs: int
+    job_ids: list[UUID]
 
 
 class PageText(BaseModel):
@@ -208,13 +261,28 @@ class ChunkDetail(BaseModel):
 
 
 class RetrievalRequest(BaseModel):
-    document_id: UUID
+    document_id: UUID | None = None
+    document_ids: list[UUID] = Field(default_factory=list, max_length=500)
+    knowledge_base_id: UUID | None = None
+    company: str | None = Field(default=None, max_length=200)
+    fiscal_year: int | None = Field(default=None, ge=1900, le=2200)
+    document_type: str | None = Field(default=None, max_length=50)
     query: str = Field(min_length=1, max_length=4000)
-    mode: Literal["BASELINE", "SEMANTIC"]
+    mode: Literal["BASELINE", "SEMANTIC", "PRODUCTION"] = "PRODUCTION"
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        scopes = bool(self.document_id) + bool(self.document_ids) + bool(self.knowledge_base_id)
+        if scopes != 1:
+            raise ValueError(
+                "Provide exactly one scope: document_id, document_ids, or knowledge_base_id."
+            )
+        return self
 
 
 class RetrievalHit(BaseModel):
     chunk_id: UUID
+    document_id: UUID
     rank: int
     final_rank: int | None = None
     chunk_type: str
@@ -226,6 +294,7 @@ class RetrievalHit(BaseModel):
     row_label: str | None = None
     raw_content: str | None = None
     semantic_content: str | None = None
+    parent_content: str | None = None
     content: str
     vector_score: float | None = None
     lexical_score: float | None = None
@@ -235,8 +304,9 @@ class RetrievalHit(BaseModel):
 
 class RetrievalDebugResponse(BaseModel):
     original_query: str
-    retrieval_mode: Literal["BASELINE", "SEMANTIC"]
-    document_id: UUID
+    retrieval_mode: Literal["BASELINE", "SEMANTIC", "PRODUCTION"]
+    document_ids: list[UUID]
+    knowledge_base_id: UUID | None = None
     embedding_model: str
     rerank_model: str
     vector_results: list[RetrievalHit]

@@ -1,6 +1,10 @@
 from uuid import uuid4
 
-from app.retrieval.service import grade_targets, reciprocal_rank_fusion
+import pytest
+from pydantic import ValidationError
+
+from app.retrieval.service import _candidate_filter, grade_targets, reciprocal_rank_fusion
+from app.schemas import RetrievalRequest
 
 
 def test_rrf_rewards_chunks_found_by_both_retrievers():
@@ -43,3 +47,37 @@ def test_golden_multi_target_rank_fails_when_one_target_is_missing():
     assert ranks["p91_t2:utilities"] is None
     assert first_relevant_rank == 1
     assert complete_rank is None
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"document_id": uuid4()},
+        {"document_ids": [uuid4(), uuid4()]},
+        {"knowledge_base_id": uuid4()},
+    ],
+)
+def test_retrieval_request_accepts_exactly_one_scope(scope):
+    request = RetrievalRequest(query="What is the allocation?", **scope)
+
+    assert request.mode == "PRODUCTION"
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {},
+        {"document_id": uuid4(), "knowledge_base_id": uuid4()},
+        {"document_id": uuid4(), "document_ids": [uuid4()]},
+    ],
+)
+def test_retrieval_request_rejects_missing_or_ambiguous_scope(scope):
+    with pytest.raises(ValidationError, match="Provide exactly one scope"):
+        RetrievalRequest(query="What is the allocation?", **scope)
+
+
+def test_production_candidates_exclude_anonymous_semantic_rows():
+    expression = str(_candidate_filter("PRODUCTION"))
+
+    assert "chunks.metadata" in expression
+    assert "!~*" in expression

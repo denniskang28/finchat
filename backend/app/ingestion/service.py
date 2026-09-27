@@ -1,9 +1,12 @@
 import asyncio
+import hashlib
 import time
 import uuid
 from pathlib import Path
 
 from fastapi import UploadFile
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -11,7 +14,7 @@ from app.ingestion.parser import PdfParser
 from app.ingestion.repair_providers import create_table_repair_provider
 from app.ingestion.renderers import build_table_debug, render_table_summary
 from app.ingestion.table_quality import TableRepairPipeline
-from app.models import Chunk, Document
+from app.models import Chunk, DEFAULT_KNOWLEDGE_BASE_ID, Document
 
 
 class IngestionService:
@@ -28,13 +31,36 @@ class IngestionService:
             page_workers=self.settings.table_parse_workers,
         )
 
-    async def ingest(self, upload: UploadFile, session: AsyncSession) -> Document:
+    async def create_document(
+        self,
+        upload: UploadFile,
+        session: AsyncSession,
+        *,
+        knowledge_base_id: uuid.UUID = DEFAULT_KNOWLEDGE_BASE_ID,
+        company: str | None = None,
+        fiscal_year: int | None = None,
+        document_type: str | None = None,
+        language: str | None = None,
+    ) -> Document:
         filename = Path(upload.filename or "document.pdf").name
         if not filename.lower().endswith(".pdf"):
             raise ValueError("Only PDF uploads are supported.")
         payload = await upload.read()
         if not payload.startswith(b"%PDF"):
             raise ValueError("Uploaded file is not a valid PDF.")
+
+        source_sha256 = hashlib.sha256(payload).hexdigest()
+        duplicate = (
+            await session.execute(
+                select(Document.id).where(
+                    Document.knowledge_base_id == knowledge_base_id,
+                    Document.source_sha256 == source_sha256,
+                    Document.status != "FAILED",
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if duplicate is not None:
+            raise ValueError(f"This PDF already exists in the knowledge base: {duplicate}")
 
         document_id = uuid.uuid4()
         self.settings.upload_dir.mkdir(parents=True, exist_ok=True)
@@ -43,15 +69,49 @@ class IngestionService:
 
         document = Document(
             id=document_id,
+            knowledge_base_id=knowledge_base_id,
             filename=filename,
             title=Path(filename).stem,
             file_path=str(stored_path),
             status="PROCESSING",
+            source_sha256=source_sha256,
+            company=company.strip() if company else None,
+            fiscal_year=fiscal_year,
+            document_type=document_type.strip() if document_type else None,
+            language=language.strip() if language else None,
             metadata_json={},
         )
         session.add(document)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            stored_path.unlink(missing_ok=True)
+            raise ValueError("This PDF already exists in the knowledge base.") from exc
+        await session.refresh(document)
+        return document
 
+    async def ingest(self, upload: UploadFile, session: AsyncSession) -> Document:
+        document = await self.create_document(upload, session)
+        return await self.process_document(document, session)
+
+    async def process_document(
+        self,
+        document: Document,
+        session: AsyncSession,
+        *,
+        final_status: str = "READY",
+    ) -> Document:
+        document_id = document.id
+        stored_path = Path(document.file_path)
+        await session.execute(delete(Chunk).where(Chunk.document_id == document_id))
+        document.status = "PARSING"
+        document.metadata_json = {
+            **document.metadata_json,
+            "table_repair_provider": self.provider.name,
+            "table_repair_model": self.provider.model,
+        }
+        await session.commit()
         try:
             parse_started_at = time.perf_counter()
             pages, tables, page_contents = await asyncio.to_thread(
@@ -256,7 +316,7 @@ class IngestionService:
                     )
 
             document.page_count = len(pages)
-            document.status = "READY"
+            document.status = final_status
             document.metadata_json = {
                 "text_pages": len(pages),
                 "tables": len(tables),
@@ -295,7 +355,7 @@ class IngestionService:
         except Exception as exc:
             await session.rollback()
             document.status = "FAILED"
-            document.metadata_json = {"error": str(exc)}
+            document.metadata_json = {**document.metadata_json, "error": str(exc)}
             session.add(document)
             await session.commit()
             raise

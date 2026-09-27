@@ -10,7 +10,9 @@ import {
   Database,
   FileText,
   GitMerge,
+  Library,
   LoaderCircle,
+  Plus,
   RefreshCw,
   Search,
   ScanSearch,
@@ -87,9 +89,10 @@ const TABLE_FILTERS = {
 
 function StatusBadge({ status }) {
   const ready = status === "READY";
+  const failed = status === "FAILED";
   return (
-    <span className={`status ${ready ? "ready" : "pending"}`}>
-      {ready ? <CheckCircle2 size={13} /> : <LoaderCircle size={13} />}
+    <span className={`status ${ready ? "ready" : failed ? "failed" : "pending"}`}>
+      {ready ? <CheckCircle2 size={13} /> : failed ? <AlertTriangle size={13} /> : <LoaderCircle className="spin" size={13} />}
       {status}
     </span>
   );
@@ -434,14 +437,18 @@ function RetrievalHit({ hit }) {
       <div className="retrieval-content-grid">
         <section><h4>Raw content</h4><pre>{hit.raw_content || hit.content}</pre></section>
         <section><h4>Semantic content</h4><pre>{hit.semantic_content || hit.content}</pre></section>
+        {hit.parent_content && <section className="parent-context"><h4>Parent context</h4><pre>{hit.parent_content}</pre></section>}
       </div>
     </article>
   );
 }
 
-function RetrievalDebugger({ documentId, onError }) {
+function RetrievalDebugger({ documentId, knowledgeBaseId, onError }) {
   const [query, setQuery] = useState("2025年底AIA美国公司债有多少，占公司债组合多少？");
-  const [mode, setMode] = useState("SEMANTIC");
+  const [mode, setMode] = useState("PRODUCTION");
+  const [scope, setScope] = useState("KNOWLEDGE_BASE");
+  const [company, setCompany] = useState("");
+  const [fiscalYear, setFiscalYear] = useState("");
   const [stage, setStage] = useState("reranked_results");
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -452,10 +459,11 @@ function RetrievalDebugger({ documentId, onError }) {
     setIndexing(true);
     onError("");
     try {
-      setIndexStatus(await api(`/api/retrieval/documents/${documentId}/index`, {
+      const path = scope === "KNOWLEDGE_BASE"
+        ? `/api/knowledge-bases/${knowledgeBaseId}/index`
+        : `/api/retrieval/documents/${documentId}/index-async`;
+      setIndexStatus(await api(path, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force: false }),
       }));
     } catch (err) {
       onError(err.message);
@@ -470,10 +478,17 @@ function RetrievalDebugger({ documentId, onError }) {
     setBusy(true);
     onError("");
     try {
+      const retrievalScope = scope === "KNOWLEDGE_BASE"
+        ? {
+            knowledge_base_id: knowledgeBaseId,
+            ...(company.trim() ? { company: company.trim() } : {}),
+            ...(fiscalYear ? { fiscal_year: Number(fiscalYear) } : {}),
+          }
+        : { document_id: documentId };
       setResult(await api("/api/retrieval/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_id: documentId, query: query.trim(), mode }),
+        body: JSON.stringify({ ...retrievalScope, query: query.trim(), mode }),
       }));
       setStage("reranked_results");
     } catch (err) {
@@ -498,8 +513,17 @@ function RetrievalDebugger({ documentId, onError }) {
           {[
             ["BASELINE", "Baseline"],
             ["SEMANTIC", "Semantic"],
+            ["PRODUCTION", "Production"],
           ].map(([value, label]) => (
             <button type="button" key={value} className={mode === value ? "active" : ""} onClick={() => setMode(value)}>{label}</button>
+          ))}
+        </div>
+        <div className="mode-control" aria-label="Retrieval scope">
+          {[
+            ["DOCUMENT", "Current file"],
+            ["KNOWLEDGE_BASE", "Knowledge base"],
+          ].map(([value, label]) => (
+            <button type="button" key={value} className={scope === value ? "active" : ""} onClick={() => setScope(value)}>{label}</button>
           ))}
         </div>
         <button type="button" className="secondary-button" onClick={buildIndex} disabled={indexing}>
@@ -511,9 +535,19 @@ function RetrievalDebugger({ documentId, onError }) {
           {busy ? "Retrieving" : "Run retrieval"}
         </button>
       </form>
+      {scope === "KNOWLEDGE_BASE" && (
+        <div className="retrieval-metadata-filters">
+          <label>Company<input value={company} onChange={(event) => setCompany(event.target.value)} placeholder="All companies" /></label>
+          <label>Fiscal year<input type="number" min="1900" max="2200" value={fiscalYear} onChange={(event) => setFiscalYear(event.target.value)} placeholder="All years" /></label>
+        </div>
+      )}
       {indexStatus && (
         <div className="index-status">
-          {indexStatus.indexed_chunks} indexed · {indexStatus.skipped_chunks} already present · {indexStatus.model} / {indexStatus.dimensions}d
+          {indexStatus.queued_jobs != null
+            ? `${indexStatus.queued_jobs} indexing jobs queued · ${indexStatus.skipped_active_jobs} already active`
+            : indexStatus.stage
+              ? `Index job ${indexStatus.status.toLowerCase()} · ${indexStatus.stage}`
+            : `${indexStatus.indexed_chunks} indexed · ${indexStatus.skipped_chunks} already present · ${indexStatus.model} / ${indexStatus.dimensions}d`}
         </div>
       )}
       {!result ? (
@@ -523,6 +557,7 @@ function RetrievalDebugger({ documentId, onError }) {
           <div className="retrieval-run-meta">
             <span><strong>Query</strong> {result.original_query}</span>
             <span><strong>Mode</strong> {result.retrieval_mode}</span>
+            <span><strong>Documents</strong> {result.document_ids.length}</span>
             <span><strong>Models</strong> {result.embedding_model} · {result.rerank_model}</span>
           </div>
           <div className="stage-tabs" role="tablist" aria-label="Retrieval pipeline stages">
@@ -542,9 +577,52 @@ function RetrievalDebugger({ documentId, onError }) {
   );
 }
 
+function UploadDialog({ file, busy, onCancel, onSubmit }) {
+  const yearMatch = file.name.match(/\b(20\d{2})\b/);
+  const [company, setCompany] = useState(file.name.match(/^(.+?)\s+(?:20\d{2}|Annual|Interim)/i)?.[1] || "");
+  const [fiscalYear, setFiscalYear] = useState(yearMatch?.[1] || "");
+  const [documentType, setDocumentType] = useState(
+    /annual results/i.test(file.name) ? "annual_results" : /interim/i.test(file.name) ? "interim_results" : "",
+  );
+  const [language, setLanguage] = useState(/\bEN\b/i.test(file.name) ? "en" : "");
+
+  function submit(event) {
+    event.preventDefault();
+    onSubmit(file, {
+      company: company.trim(),
+      fiscal_year: fiscalYear,
+      document_type: documentType,
+      language: language.trim(),
+    });
+  }
+
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <form className="upload-dialog" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="upload-title">
+        <header>
+          <div><div className="eyebrow">Queue finance document</div><h2 id="upload-title">{file.name}</h2></div>
+          <button type="button" className="icon-button" onClick={onCancel} aria-label="Close upload dialog"><X size={17} /></button>
+        </header>
+        <div className="upload-metadata-grid">
+          <label>Company<input value={company} onChange={(event) => setCompany(event.target.value)} placeholder="e.g. AIA Group" /></label>
+          <label>Fiscal year<input type="number" min="1900" max="2200" value={fiscalYear} onChange={(event) => setFiscalYear(event.target.value)} /></label>
+          <label>Document type<select value={documentType} onChange={(event) => setDocumentType(event.target.value)}><option value="">Unspecified</option><option value="annual_results">Annual results</option><option value="interim_results">Interim results</option><option value="annual_report">Annual report</option><option value="presentation">Presentation</option></select></label>
+          <label>Language<input value={language} onChange={(event) => setLanguage(event.target.value)} placeholder="en, zh" /></label>
+        </div>
+        <footer>
+          <button type="button" className="secondary-button" onClick={onCancel}>Cancel</button>
+          <button type="submit" className="primary-button" disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}{busy ? "Queueing" : "Queue upload"}</button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
 function App() {
   const inputRef = useRef(null);
   const [documents, setDocuments] = useState([]);
+  const [knowledgeBases, setKnowledgeBases] = useState([]);
+  const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState(null);
   const [providers, setProviders] = useState([]);
   const [selectedProvider, setSelectedProvider] = useState("");
   const [selectedId, setSelectedId] = useState(null);
@@ -557,6 +635,7 @@ function App() {
   const [tableFilter, setTableFilter] = useState("pages");
   const [pageFilter, setPageFilter] = useState("all");
   const [busy, setBusy] = useState(false);
+  const [pendingFile, setPendingFile] = useState(null);
   const [error, setError] = useState("");
 
   const selected = documents.find((document) => document.id === selectedId);
@@ -578,12 +657,22 @@ function App() {
     setPageFilter("all");
   }
 
-  async function loadDocuments(preferredId) {
-    const result = await api("/api/documents");
+  async function loadDocuments(preferredId, knowledgeBaseId = selectedKnowledgeBaseId) {
+    if (!knowledgeBaseId) return null;
+    const result = await api(`/api/knowledge-bases/${knowledgeBaseId}/documents`);
     setDocuments(result);
-    const nextId = preferredId || selectedId || result[0]?.id || null;
+    const currentId = preferredId || selectedId;
+    const nextId = result.some((document) => document.id === currentId) ? currentId : result[0]?.id || null;
     setSelectedId(nextId);
     return nextId;
+  }
+
+  async function loadKnowledgeBases() {
+    const result = await api("/api/knowledge-bases");
+    setKnowledgeBases(result);
+    setSelectedKnowledgeBaseId((current) => (
+      result.some((knowledgeBase) => knowledgeBase.id === current) ? current : result[0]?.id || null
+    ));
   }
 
   async function loadProviders() {
@@ -623,12 +712,30 @@ function App() {
   }
 
   useEffect(() => {
-    Promise.all([loadDocuments(), loadProviders()]).catch((err) => setError(err.message));
+    Promise.all([loadKnowledgeBases(), loadProviders()]).catch((err) => setError(err.message));
   }, []);
 
   useEffect(() => {
+    loadDocuments(null, selectedKnowledgeBaseId).catch((err) => setError(err.message));
+  }, [selectedKnowledgeBaseId]);
+
+  useEffect(() => {
+    if (selected?.status !== "READY") {
+      setTables([]);
+      setChunks([]);
+      return;
+    }
     Promise.all([loadTables(selectedId), loadChunks(selectedId)]).catch((err) => setError(err.message));
-  }, [selectedId]);
+  }, [selectedId, selected?.status]);
+
+  useEffect(() => {
+    const hasActiveDocuments = documents.some((document) => !["READY", "FAILED"].includes(document.status));
+    if (!selectedKnowledgeBaseId || !hasActiveDocuments) return undefined;
+    const timer = window.setInterval(() => {
+      loadDocuments(null, selectedKnowledgeBaseId).catch((err) => setError(err.message));
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [documents, selectedKnowledgeBaseId]);
 
   useEffect(() => {
     if (viewMode !== "chunks" || !selectedId || !selectedChunkId) return undefined;
@@ -642,22 +749,42 @@ function App() {
     return () => { active = false; };
   }, [selectedChunkId, selectedId, viewMode]);
 
-  async function uploadFile(file) {
+  async function uploadFile(file, metadata) {
     if (!file) return;
     setBusy(true);
     setError("");
     const body = new FormData();
     body.append("file", file);
     if (selectedProvider) body.append("provider", selectedProvider);
+    Object.entries(metadata).forEach(([key, value]) => {
+      if (value !== "") body.append(key, value);
+    });
     try {
-      const document = await api("/api/documents", { method: "POST", body });
-      await loadDocuments(document.id);
-      await Promise.all([loadTables(document.id), loadChunks(document.id)]);
+      const response = await api(`/api/knowledge-bases/${selectedKnowledgeBaseId}/documents`, { method: "POST", body });
+      await loadDocuments(response.document.id, selectedKnowledgeBaseId);
+      await loadKnowledgeBases();
+      setPendingFile(null);
     } catch (err) {
       setError(err.message);
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
+  async function createKnowledgeBase() {
+    const name = window.prompt("Knowledge base name");
+    if (!name?.trim()) return;
+    try {
+      const result = await api("/api/knowledge-bases", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      await loadKnowledgeBases();
+      setSelectedKnowledgeBaseId(result.id);
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -688,7 +815,7 @@ function App() {
             className="icon-button"
             title="Refresh documents"
             aria-label="Refresh documents"
-            onClick={() => loadDocuments().catch((err) => setError(err.message))}
+            onClick={() => Promise.all([loadKnowledgeBases(), loadDocuments()]).catch((err) => setError(err.message))}
           >
             <RefreshCw size={18} />
           </button>
@@ -697,11 +824,11 @@ function App() {
             type="file"
             accept="application/pdf,.pdf"
             hidden
-            onChange={(event) => uploadFile(event.target.files?.[0])}
+            onChange={(event) => setPendingFile(event.target.files?.[0] || null)}
           />
           <button className="primary-button" onClick={() => inputRef.current?.click()} disabled={busy}>
             {busy ? <LoaderCircle className="spin" size={17} /> : <Upload size={17} />}
-            {busy ? "Parsing PDF" : "Upload PDF"}
+            {busy ? "Queueing" : "Upload PDF"}
           </button>
         </div>
       </header>
@@ -715,6 +842,19 @@ function App() {
 
       <div className="workspace">
         <aside className="sidebar">
+          <div className="knowledge-base-picker">
+            <div className="section-label"><Library size={15} /> Knowledge base</div>
+            <div>
+              <select value={selectedKnowledgeBaseId || ""} onChange={(event) => setSelectedKnowledgeBaseId(event.target.value)}>
+                {knowledgeBases.map((knowledgeBase) => (
+                  <option key={knowledgeBase.id} value={knowledgeBase.id}>
+                    {knowledgeBase.name} ({knowledgeBase.ready_document_count}/{knowledgeBase.document_count})
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="icon-button" onClick={createKnowledgeBase} title="Create knowledge base" aria-label="Create knowledge base"><Plus size={16} /></button>
+            </div>
+          </div>
           <div className="section-label"><Database size={15} /> Documents</div>
           <div className="document-list">
             {documents.map((document) => (
@@ -727,6 +867,7 @@ function App() {
                 <span>
                   <strong>{document.filename}</strong>
                   <small>{document.page_count ?? 0} pages · {document.metadata.tables ?? 0} tables</small>
+                  <StatusBadge status={document.status} />
                   {document.metadata.table_repair_model && (
                     <small className="document-run">
                       {document.metadata.table_repair_model}
@@ -862,12 +1003,23 @@ function App() {
                 />
               )}
               {viewMode === "retrieval" && (
-                <RetrievalDebugger key={selectedId} documentId={selectedId} onError={setError} />
+                <RetrievalDebugger key={`${selectedId}-${selectedKnowledgeBaseId}`} documentId={selectedId} knowledgeBaseId={selectedKnowledgeBaseId} onError={setError} />
               )}
             </>
           )}
         </main>
       </div>
+      {pendingFile && (
+        <UploadDialog
+          file={pendingFile}
+          busy={busy}
+          onCancel={() => {
+            setPendingFile(null);
+            if (inputRef.current) inputRef.current.value = "";
+          }}
+          onSubmit={uploadFile}
+        />
+      )}
     </div>
   );
 }

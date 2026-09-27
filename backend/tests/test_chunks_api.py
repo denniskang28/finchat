@@ -6,7 +6,8 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from app.api.documents import get_chunk, list_chunks
+from app.api.documents import get_chunk, list_chunks, update_document_metadata
+from app.schemas import DocumentMetadataUpdate
 
 
 class _ScalarResult:
@@ -32,6 +33,12 @@ class _Session:
     async def execute(self, statement):
         self.statements.append(statement)
         return _ScalarResult(self.chunks)
+
+    async def commit(self):
+        pass
+
+    async def refresh(self, _value):
+        pass
 
 
 def _chunk(document_id):
@@ -98,3 +105,34 @@ def test_get_chunk_returns_404_when_chunk_is_not_in_document():
 
     assert error.value.status_code == 404
     assert error.value.detail == "Chunk not found"
+
+
+def test_metadata_patch_preserves_fields_that_were_not_sent():
+    document = SimpleNamespace(
+        id=uuid4(),
+        knowledge_base_id=uuid4(),
+        filename="report.pdf",
+        title="report",
+        status="READY",
+        page_count=10,
+        company="Old Company",
+        fiscal_year=2025,
+        document_type="annual_results",
+        language="en",
+        metadata_json={},
+        created_at=datetime.now(UTC),
+    )
+    session = _Session(document, [])
+
+    result = asyncio.run(
+        update_document_metadata(
+            document.id,
+            DocumentMetadataUpdate(company="New Company"),
+            session,
+        )
+    )
+
+    assert result["company"] == "New Company"
+    assert result["fiscal_year"] == 2025
+    assert result["document_type"] == "annual_results"
+    assert result["language"] == "en"

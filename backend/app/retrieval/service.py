@@ -16,7 +16,7 @@ from app.retrieval.golden import GOLDEN_QUERIES
 from app.retrieval.providers import AlibabaRetrievalProvider
 from app.schemas import ParsedTable
 
-RetrievalMode = Literal["BASELINE", "SEMANTIC"]
+RetrievalMode = Literal["BASELINE", "SEMANTIC", "PRODUCTION"]
 
 
 def reciprocal_rank_fusion(
@@ -46,6 +46,23 @@ def grade_targets(
 
 
 def _candidate_filter(mode: RetrievalMode):
+    if mode == "PRODUCTION":
+        row_label = Chunk.metadata_json["row_label"].astext
+        return or_(
+            and_(Chunk.chunk_type == "TEXT", Chunk.representation == "TEXT"),
+            Chunk.representation == "SUMMARY",
+            and_(
+                Chunk.representation == "SEMANTIC_ROW",
+                or_(
+                    row_label.is_(None),
+                    row_label.op("!~*")(r"^row\s+[0-9]+$"),
+                ),
+            ),
+            and_(
+                Chunk.representation == "SEMANTIC",
+                Chunk.chunk_type.in_(["SECTION", "FACT"]),
+            ),
+        )
     row_representation = "RAW_ROW" if mode == "BASELINE" else "SEMANTIC_ROW"
     return or_(
         and_(Chunk.chunk_type == "TEXT", Chunk.representation == "TEXT"),
@@ -58,6 +75,10 @@ def _indexable_filter():
     return or_(
         and_(Chunk.chunk_type == "TEXT", Chunk.representation == "TEXT"),
         Chunk.representation.in_(["RAW_ROW", "SEMANTIC_ROW", "SUMMARY"]),
+        and_(
+            Chunk.representation == "SEMANTIC",
+            Chunk.chunk_type.in_(["SECTION", "FACT"]),
+        ),
     )
 
 
@@ -170,10 +191,12 @@ class RetrievalService:
 
     async def search(
         self,
-        document: Document,
+        documents: list[Document],
         query: str,
         mode: RetrievalMode,
         session: AsyncSession,
+        *,
+        knowledge_base_id: UUID | None = None,
     ) -> dict:
         query = unicodedata.normalize("NFC", query.strip())
         if not query:
@@ -181,6 +204,8 @@ class RetrievalService:
         query_vector = (await self.provider.embed([query], text_type="query"))[0]
         lexical_limit = self.settings.retrieval_lexical_top_k
         vector_limit = self.settings.retrieval_vector_top_k
+        document_ids = [document.id for document in documents]
+        document_by_id = {document.id: document for document in documents}
 
         tsquery = func.websearch_to_tsquery("simple", query)
         lexical_score_expr = func.ts_rank_cd(Chunk.search_vector, tsquery, 32).label(
@@ -190,7 +215,7 @@ class RetrievalService:
             await session.execute(
                 select(Chunk, lexical_score_expr)
                 .where(
-                    Chunk.document_id == document.id,
+                    Chunk.document_id.in_(document_ids),
                     _candidate_filter(mode),
                     Chunk.search_vector.op("@@")(tsquery),
                 )
@@ -204,7 +229,7 @@ class RetrievalService:
             await session.execute(
                 select(Chunk, distance_expr)
                 .where(
-                    Chunk.document_id == document.id,
+                    Chunk.document_id.in_(document_ids),
                     _candidate_filter(mode),
                     Chunk.embedding.is_not(None),
                 )
@@ -234,24 +259,59 @@ class RetrievalService:
         rerank_scores = {
             rrf_chunks[index].id: score for index, score in rerank_pairs
         }
-        final_chunks = reranked_all[: self.settings.retrieval_final_top_k]
+        final_chunks = []
+        per_document_counts: dict[UUID, int] = defaultdict(int)
+        per_document_limit = 3 if len(documents) > 1 else self.settings.retrieval_final_top_k
+        for chunk in reranked_all:
+            if per_document_counts[chunk.document_id] >= per_document_limit:
+                continue
+            final_chunks.append(chunk)
+            per_document_counts[chunk.document_id] += 1
+            if len(final_chunks) >= self.settings.retrieval_final_top_k:
+                break
         final_ranks = {chunk.id: rank for rank, chunk in enumerate(final_chunks, start=1)}
+
+        parent_keys = {
+            (chunk.document_id, chunk.metadata_json.get("parent_key"))
+            for chunk in chunk_by_id.values()
+            if chunk.metadata_json.get("parent_key")
+        }
+        parent_content: dict[tuple[UUID, str], str] = {}
+        if parent_keys:
+            keys = {key for _, key in parent_keys}
+            parents = (
+                await session.execute(
+                    select(Chunk).where(
+                        Chunk.document_id.in_(document_ids),
+                        Chunk.comparison_key.in_(keys),
+                    )
+                )
+            ).scalars()
+            parent_content = {
+                (parent.document_id, parent.comparison_key): parent.content
+                for parent in parents
+                if parent.comparison_key
+            }
 
         def hits(chunks: list[Chunk]) -> list[dict]:
             return [
                 {
                     "chunk_id": chunk.id,
+                    "document_id": chunk.document_id,
                     "rank": rank,
                     "final_rank": final_ranks.get(chunk.id),
                     "chunk_type": chunk.chunk_type,
                     "representation": chunk.representation,
                     "comparison_key": chunk.comparison_key,
-                    "file": document.filename,
+                    "file": document_by_id[chunk.document_id].filename,
                     "page": chunk.page_number,
                     "table_title": chunk.metadata_json.get("table_title"),
                     "row_label": chunk.metadata_json.get("row_label"),
                     "raw_content": chunk.raw_content,
                     "semantic_content": chunk.semantic_content,
+                    "parent_content": parent_content.get(
+                        (chunk.document_id, chunk.metadata_json.get("parent_key"))
+                    ),
                     "content": chunk.content,
                     "vector_score": vector_scores.get(chunk.id),
                     "lexical_score": lexical_scores.get(chunk.id),
@@ -264,7 +324,8 @@ class RetrievalService:
         return {
             "original_query": query,
             "retrieval_mode": mode,
-            "document_id": document.id,
+            "document_ids": document_ids,
+            "knowledge_base_id": knowledge_base_id,
             "embedding_model": self.provider.embedding_model,
             "rerank_model": self.provider.rerank_model,
             "vector_results": hits(vector_chunks),
@@ -277,7 +338,7 @@ class RetrievalService:
         results = []
         for mode in ("BASELINE", "SEMANTIC"):
             for golden in GOLDEN_QUERIES:
-                debug = await self.search(document, golden["query"], mode, session)
+                debug = await self.search([document], golden["query"], mode, session)
                 stage_ranks = {}
                 for stage in (
                     "vector_results",

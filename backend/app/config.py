@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     retrieval_rrf_top_k: int = 20
     retrieval_final_top_k: int = 6
     retrieval_rrf_k: int = 60
+    worker_poll_seconds: float = 1.0
+    worker_max_attempts: int = 3
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_vision_model: str = "deepseek-flash"
