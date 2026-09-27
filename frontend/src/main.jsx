@@ -560,6 +560,7 @@ function RetrievalDebugger({ documentId, knowledgeBaseId, knowledgeBaseOnly = fa
             <span><strong>Query</strong> {result.original_query}</span>
             <span><strong>Mode</strong> {result.retrieval_mode}</span>
             <span><strong>Documents</strong> {result.document_ids.length}</span>
+            {(result.query_years?.length ?? 0) > 0 && <span><strong>Query years</strong> {result.query_years.join(", ")}</span>}
             <span><strong>Models</strong> {result.embedding_model} · {result.rerank_model}</span>
           </div>
           <div className="stage-tabs" role="tablist" aria-label="Retrieval pipeline stages">

@@ -1,9 +1,16 @@
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
-from app.retrieval.service import _candidate_filter, grade_targets, reciprocal_rank_fusion
+from app.retrieval.context import enrich_semantic_content
+from app.retrieval.service import (
+    _candidate_filter,
+    extract_query_years,
+    grade_targets,
+    reciprocal_rank_fusion,
+)
 from app.schemas import RetrievalRequest
 
 
@@ -81,3 +88,26 @@ def test_production_candidates_exclude_anonymous_semantic_rows():
 
     assert "chunks.metadata" in expression
     assert "!~*" in expression
+
+
+def test_extract_query_years_only_returns_years_present_in_scope():
+    assert extract_query_years(
+        "Compare 2023, 2024 and 2025", {2024, 2025, 2026}
+    ) == [2024, 2025]
+
+
+def test_document_context_is_replaced_instead_of_duplicated():
+    document = SimpleNamespace(
+        company="AIA Group",
+        fiscal_year=2024,
+        document_type="annual_results",
+        title="Annual Results",
+    )
+    first = enrich_semantic_content("Row label: United States.", document)
+    document.fiscal_year = 2025
+    second = enrich_semantic_content(first, document)
+
+    assert second.count("[Document context]") == 1
+    assert "Fiscal year: 2025." in second
+    assert "Fiscal year: 2024." not in second
+    assert second.endswith("Row label: United States.")

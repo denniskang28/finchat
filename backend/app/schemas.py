@@ -307,6 +307,7 @@ class RetrievalDebugResponse(BaseModel):
     retrieval_mode: Literal["BASELINE", "SEMANTIC", "PRODUCTION"]
     document_ids: list[UUID]
     knowledge_base_id: UUID | None = None
+    query_years: list[int] = Field(default_factory=list)
     embedding_model: str
     rerank_model: str
     vector_results: list[RetrievalHit]

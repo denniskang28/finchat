@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import unicodedata
 from collections import defaultdict
 from typing import Literal
@@ -12,11 +13,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.ingestion.renderers import render_table_summary
 from app.models import Chunk, Document
+from app.retrieval.context import (
+    document_context_metadata,
+    enrich_semantic_content,
+)
 from app.retrieval.golden import GOLDEN_QUERIES
 from app.retrieval.providers import AlibabaRetrievalProvider
 from app.schemas import ParsedTable
 
 RetrievalMode = Literal["BASELINE", "SEMANTIC", "PRODUCTION"]
+
+
+def extract_query_years(query: str, available_years: set[int]) -> list[int]:
+    requested = {int(value) for value in re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", query)}
+    return sorted(requested & available_years)
 
 
 def reciprocal_rank_fusion(
@@ -95,6 +105,7 @@ class RetrievalService:
         force: bool = False,
     ) -> dict:
         await self._ensure_table_summaries(document_id, session)
+        await self._apply_document_context(document_id, session)
         statement = (
             select(Chunk)
             .where(Chunk.document_id == document_id, _indexable_filter())
@@ -134,6 +145,40 @@ class RetrievalService:
             "skipped_chunks": len(chunks) - len(pending),
             "total_indexable_chunks": len(chunks),
         }
+
+    async def _apply_document_context(
+        self, document_id: UUID, session: AsyncSession
+    ) -> None:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise ValueError("Document not found.")
+        chunks = list(
+            (
+                await session.execute(
+                    select(Chunk).where(
+                        Chunk.document_id == document_id,
+                        or_(
+                            Chunk.representation.in_(["SEMANTIC_ROW", "SUMMARY"]),
+                            and_(
+                                Chunk.representation == "SEMANTIC",
+                                Chunk.chunk_type.in_(["SECTION", "FACT"]),
+                            ),
+                        ),
+                    )
+                )
+            ).scalars()
+        )
+        context_metadata = document_context_metadata(document)
+        for chunk in chunks:
+            enriched = enrich_semantic_content(
+                chunk.semantic_content or chunk.content, document
+            )
+            if chunk.content != enriched:
+                chunk.content = enriched
+                chunk.semantic_content = enriched
+                chunk.embedding = None
+            chunk.metadata_json = {**chunk.metadata_json, **context_metadata}
+        await session.flush()
 
     async def _ensure_table_summaries(
         self, document_id: UUID, session: AsyncSession
@@ -201,11 +246,28 @@ class RetrievalService:
         query = unicodedata.normalize("NFC", query.strip())
         if not query:
             raise ValueError("Query cannot be empty.")
-        query_vector = (await self.provider.embed([query], text_type="query"))[0]
         lexical_limit = self.settings.retrieval_lexical_top_k
         vector_limit = self.settings.retrieval_vector_top_k
-        document_ids = [document.id for document in documents]
-        document_by_id = {document.id: document for document in documents}
+        available_years = {
+            document.fiscal_year for document in documents if document.fiscal_year is not None
+        }
+        query_years = extract_query_years(query, available_years)
+        active_documents = (
+            [document for document in documents if document.fiscal_year in query_years]
+            if query_years
+            else documents
+        )
+        document_ids = [document.id for document in active_documents]
+        document_by_id = {document.id: document for document in active_documents}
+
+        focused_queries = [
+            f"{query}\nRetrieve the evidence specifically for fiscal year {year}."
+            for year in query_years
+        ]
+        query_vectors = await self.provider.embed(
+            [query, *focused_queries], text_type="query"
+        )
+        query_vector = query_vectors[0]
 
         tsquery = func.websearch_to_tsquery("simple", query)
         lexical_score_expr = func.ts_rank_cd(Chunk.search_vector, tsquery, 32).label(
@@ -224,24 +286,56 @@ class RetrievalService:
             )
         ).all()
 
-        distance_expr = Chunk.embedding.cosine_distance(query_vector).label("distance")
-        vector_rows = (
-            await session.execute(
-                select(Chunk, distance_expr)
-                .where(
-                    Chunk.document_id.in_(document_ids),
-                    _candidate_filter(mode),
-                    Chunk.embedding.is_not(None),
-                )
-                .order_by(distance_expr, Chunk.id)
-                .limit(vector_limit)
+        async def vector_search(
+            scoped_document_ids: list[UUID], vector: list[float], limit: int
+        ) -> list[tuple[Chunk, float]]:
+            distance_expr = Chunk.embedding.cosine_distance(vector).label("distance")
+            return list(
+                (
+                    await session.execute(
+                        select(Chunk, distance_expr)
+                        .where(
+                            Chunk.document_id.in_(scoped_document_ids),
+                            _candidate_filter(mode),
+                            Chunk.embedding.is_not(None),
+                        )
+                        .order_by(distance_expr, Chunk.id)
+                        .limit(limit)
+                    )
+                ).all()
             )
-        ).all()
+
+        vector_ranked_rows = [
+            await vector_search(document_ids, query_vector, vector_limit)
+        ]
+        for year, year_vector in zip(query_years, query_vectors[1:], strict=True):
+            year_document_ids = [
+                document.id
+                for document in active_documents
+                if document.fiscal_year == year
+            ]
+            vector_ranked_rows.append(
+                await vector_search(year_document_ids, year_vector, min(10, vector_limit))
+            )
 
         lexical_chunks = [row[0] for row in lexical_rows]
-        vector_chunks = [row[0] for row in vector_rows]
         lexical_scores = {chunk.id: float(score) for chunk, score in lexical_rows}
-        vector_scores = {chunk.id: 1.0 - float(distance) for chunk, distance in vector_rows}
+        vector_chunk_by_id = {
+            chunk.id: chunk for rows in vector_ranked_rows for chunk, _ in rows
+        }
+        vector_scores: dict[UUID, float] = {}
+        for rows in vector_ranked_rows:
+            for chunk, distance in rows:
+                vector_scores[chunk.id] = max(
+                    vector_scores.get(chunk.id, float("-inf")),
+                    1.0 - float(distance),
+                )
+        vector_ids, _ = reciprocal_rank_fusion(
+            [[chunk.id for chunk, _ in rows] for rows in vector_ranked_rows],
+            k=self.settings.retrieval_rrf_k,
+            limit=vector_limit,
+        )
+        vector_chunks = [vector_chunk_by_id[chunk_id] for chunk_id in vector_ids]
 
         chunk_by_id = {chunk.id: chunk for chunk in [*lexical_chunks, *vector_chunks]}
         rrf_ids, rrf_scores = reciprocal_rank_fusion(
@@ -326,6 +420,7 @@ class RetrievalService:
             "retrieval_mode": mode,
             "document_ids": document_ids,
             "knowledge_base_id": knowledge_base_id,
+            "query_years": query_years,
             "embedding_model": self.provider.embedding_model,
             "rerank_model": self.provider.rerank_model,
             "vector_results": hits(vector_chunks),

@@ -20,6 +20,8 @@ This remains a retrieval POC. It supports multi-document ingestion and retrieval
 
 Knowledge-base searches may filter by `company`, `fiscal_year`, and `document_type`. The pipeline remains lexical top 20 plus vector top 20, RRF top 20, rerank, then final top 6. Multi-document final results allow at most three hits per document to avoid one report consuming all six positions. Production mode excludes anonymous semantic rows such as `Row 1`, because they have a value but no usable financial entity label; the Baseline and Semantic experiment modes remain unchanged.
 
+Semantic rows, table summaries, sections, and facts are embedded with document context containing company, fiscal year, document type, and report title. When a query explicitly names years that exist in the selected scope, retrieval limits candidates to those years and runs an additional dense search for each year before vector fusion. This prevents a comparison query such as 2024 versus 2025 from losing one period in the global top-k pool.
+
 ## Storage and indexes
 
 - `knowledge_bases` owns logical corpora.

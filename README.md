@@ -31,6 +31,8 @@ Select a knowledge base, upload a PDF, add finance metadata, and choose either Q
 
 Use `Search all documents` in the sidebar for an explicit knowledge-base-wide query, or open a document's `Retrieval` tab to compare current-file and knowledge-base scopes. Baseline uses `TEXT + RAW_ROW`; Semantic uses `TEXT + TABLE_SUMMARY + SEMANTIC_ROW`; Production adds verified narrative `SECTION` and `FACT` chunks. Company and fiscal-year filters are available for knowledge-base retrieval. `Build index` queues work rather than holding an HTTP request open.
 
+Semantic embeddings include company, fiscal year, document type, and report title. Queries that explicitly mention multiple available years automatically run a focused dense retrieval for each year before vector fusion, RRF, and reranking. The Retrieval Debug UI shows the detected query years and the number of documents actually searched.
+
 The worker is horizontally scalable because jobs are claimed with PostgreSQL `FOR UPDATE SKIP LOCKED`:
 
 ```bash
