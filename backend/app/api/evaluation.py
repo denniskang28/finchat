@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.evaluation.service import EvaluationService, _case_response
+from app.evaluation.provider import generation_provider_catalog
 from app.models import (
     EvaluationCase,
     EvaluationCaseResult,
@@ -38,6 +39,11 @@ from app.schemas import (
 
 
 router = APIRouter(prefix="/api/evaluation", tags=["evaluation"])
+
+
+@router.get("/generation-providers")
+async def list_generation_providers() -> list[dict]:
+    return generation_provider_catalog()
 
 
 def _dataset_response(dataset: EvaluationDataset, case_count: int, approved_count: int) -> dict:
@@ -216,9 +222,20 @@ async def generate_cases(
             language=request.language,
             difficulty=request.difficulty,
             include_insufficient=request.include_insufficient,
+            scenario_mix=(
+                request.scenario_mix.model_dump() if request.scenario_mix else None
+            ),
+            generation_provider=request.generation_provider,
+            generation_model=request.generation_model,
+            document_ids=request.document_ids,
+            years=request.years,
+            company=request.company,
+            allow_calculations=request.allow_calculations,
             session=session,
         )
-    except (ValueError, RuntimeError) as exc:
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return [_case_response(case) for case in cases]
 
@@ -343,6 +360,7 @@ async def clone_dataset(
             required_evidence_json=case.required_evidence_json,
             scope_json=case.scope_json,
             tags_json=case.tags_json,
+            generation_metadata_json=case.generation_metadata_json,
             difficulty=case.difficulty,
             source=case.source,
             status=case.status,

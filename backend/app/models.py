@@ -140,6 +140,9 @@ class EvaluationCase(Base):
     required_evidence_json: Mapped[list] = mapped_column("required_evidence", JSONB, nullable=False, default=list)
     scope_json: Mapped[dict] = mapped_column("scope", JSONB, nullable=False, default=dict)
     tags_json: Mapped[list] = mapped_column("tags", JSONB, nullable=False, default=list)
+    generation_metadata_json: Mapped[dict] = mapped_column(
+        "generation_metadata", JSONB, nullable=False, default=dict
+    )
     difficulty: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="MANUAL")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")

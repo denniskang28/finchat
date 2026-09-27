@@ -9,13 +9,25 @@ from pydantic import BaseModel, Field, ValidationError
 from app.config import Settings, get_settings
 
 
+GENERATION_PROMPT_VERSION = "evidence-bundle-v1"
+
+
+class GeneratedCalculation(BaseModel):
+    expression: str = Field(min_length=1)
+    result: str = Field(min_length=1)
+    unit: str | None = None
+
+
 class GeneratedQuestion(BaseModel):
-    source_index: int = Field(ge=0)
+    bundle_index: int = Field(ge=0)
+    scenario_type: str
+    source_ids_used: list[str] = Field(min_length=1)
     question: str = Field(min_length=1)
     expected_answer: str = Field(min_length=1)
     language: str
     difficulty: str = "medium"
     tags: list[str] = Field(default_factory=list)
+    calculations: list[GeneratedCalculation] = Field(default_factory=list)
 
 
 class GeneratedQuestionBatch(BaseModel):
@@ -31,13 +43,21 @@ class JudgeResult(BaseModel):
     rationale: str = ""
 
 
-class AlibabaEvaluationProvider:
-    def __init__(self, settings: Settings | None = None) -> None:
-        self.settings = settings or get_settings()
-        self.api_key = self.settings.dashscope_api_key
-        self.base_url = self.settings.alibaba_base_url.rstrip("/")
-        self.model = self.settings.alibaba_evaluation_model
-        self.timeout = self.settings.table_repair_timeout_seconds
+class OpenAICompatibleEvaluationProvider:
+    def __init__(
+        self,
+        *,
+        name: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout: float,
+    ) -> None:
+        self.name = name
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout = timeout
 
     @property
     def available(self) -> bool:
@@ -45,11 +65,11 @@ class AlibabaEvaluationProvider:
 
     async def _json_completion(self, system: str, user: str) -> dict:
         if not self.available:
-            raise ValueError("DASHSCOPE_API_KEY is required for evaluation generation and judging.")
+            raise ValueError(f"{self.name} API key is required for evaluation.")
         payload = {
             "model": self.model,
             "temperature": 0,
-            "max_tokens": 4000,
+            "max_tokens": 5000,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system},
@@ -70,12 +90,12 @@ class AlibabaEvaluationProvider:
                     )
                     if response.status_code in {429, 500, 502, 503, 504}:
                         last_error = RuntimeError(
-                            f"Alibaba evaluation request failed ({response.status_code}): "
+                            f"{self.name} evaluation request failed ({response.status_code}): "
                             f"{response.text[:500]}"
                         )
                     elif response.is_error:
                         raise RuntimeError(
-                            f"Alibaba evaluation request failed ({response.status_code}): "
+                            f"{self.name} evaluation request failed ({response.status_code}): "
                             f"{response.text[:500]}"
                         )
                     else:
@@ -85,36 +105,54 @@ class AlibabaEvaluationProvider:
                     last_error = exc
                 if attempt < 2:
                     await asyncio.sleep(0.5 * (attempt + 1))
-        raise RuntimeError(f"Alibaba evaluation request failed after 3 attempts: {last_error}")
+        raise RuntimeError(f"{self.name} evaluation request failed after 3 attempts: {last_error}")
 
     async def generate_questions(
         self,
-        sources: list[dict],
+        bundles: list[dict],
         *,
         language: str,
         difficulty: str,
+        allow_calculations: bool,
     ) -> list[GeneratedQuestion]:
-        system = """Generate grounded financial-report evaluation questions from the supplied evidence.
-Return JSON only: {"cases":[{"source_index":0,"question":"...","expected_answer":"...","language":"en","difficulty":"medium","tags":["table","numeric"]}]}.
+        system = """Generate grounded financial-report evaluation questions from evidence bundles.
+Return JSON only:
+{"cases":[{"bundle_index":0,"scenario_type":"CROSS_YEAR","source_ids_used":["S1","S2"],"question":"...","expected_answer":"...","language":"en","difficulty":"medium","tags":["cross-year","numeric"],"calculations":[{"expression":"6.2 - 5.7","result":"0.5","unit":"USD billion"}]}]}.
 Rules:
-1. Generate exactly one question for each source and use only that source.
-2. The expected answer must be directly and completely supported by the source.
-3. Preserve exact numbers, currency, units, dates, and FY/H1 distinctions.
-4. Do not mention source index, chunk, page, evidence, or retrieval in the question.
-5. Prefer useful finance questions over trivial document-location questions.
-6. Do not invent or calculate values unless the arithmetic and all inputs are explicit."""
+1. Generate exactly one question for each bundle and preserve its bundle_index and scenario_type.
+2. SINGLE_DOCUMENT uses its one source. CROSS_YEAR and CROSS_DOCUMENT must require facts from every source in that bundle.
+3. The expected answer must be directly and completely supported by the sources. Preserve exact numbers, currency, units, dates, FY/H1, and percentage-point distinctions.
+4. A cross-year question and answer must identify every source fiscal_year and use the value for that fiscal_year from each source. Ignore other historical periods present inside a source. Never compare FY with H1 as if they were the same period.
+5. source_ids_used must contain every source_id that supports the answer and no others.
+6. Do not mention sources, chunks, pages, evidence, or retrieval in the question.
+7. Calculated values are allowed only when requested. Record every calculation using a simple arithmetic expression whose operands occur in the sources. Do not use thousands separators in calculation expressions. Otherwise return an empty calculations list.
+8. Prefer useful finance questions over document-location questions."""
         payload = {
+            "prompt_version": GENERATION_PROMPT_VERSION,
             "requested_language": language,
             "requested_difficulty": difficulty,
-            "sources": sources,
+            "allow_calculations": allow_calculations,
+            "bundles": bundles,
         }
         try:
             parsed = GeneratedQuestionBatch.model_validate(
                 await self._json_completion(system, json.dumps(payload, ensure_ascii=False))
             )
         except ValidationError as exc:
-            raise RuntimeError("Qwen returned invalid generated evaluation cases.") from exc
+            raise RuntimeError(f"{self.name} returned invalid generated evaluation cases.") from exc
         return parsed.cases
+
+
+class AlibabaEvaluationProvider(OpenAICompatibleEvaluationProvider):
+    def __init__(self, settings: Settings | None = None, *, model: str | None = None) -> None:
+        settings = settings or get_settings()
+        super().__init__(
+            name="alibaba",
+            api_key=settings.dashscope_api_key,
+            base_url=settings.alibaba_base_url,
+            model=model or settings.alibaba_evaluation_model,
+            timeout=settings.table_repair_timeout_seconds,
+        )
 
     async def judge(
         self,
@@ -142,3 +180,53 @@ Do not reward unsupported statements. Return JSON only with correctness, complet
             )
         except ValidationError as exc:
             raise RuntimeError("Qwen returned an invalid evaluation judgment.") from exc
+
+
+def generation_provider_catalog(settings: Settings | None = None) -> list[dict]:
+    settings = settings or get_settings()
+    return [
+        {
+            "provider": "alibaba",
+            "display_name": "Alibaba Cloud / Qwen",
+            "model": model,
+            "available": bool(settings.dashscope_api_key),
+        }
+        for model in settings.alibaba_generation_model_list
+    ] + [
+        {
+            "provider": "deepseek",
+            "display_name": "DeepSeek",
+            "model": model,
+            "available": bool(settings.deepseek_api_key),
+        }
+        for model in settings.deepseek_generation_model_list
+    ]
+
+
+def create_generation_provider(
+    provider_name: str,
+    model: str | None = None,
+    settings: Settings | None = None,
+) -> OpenAICompatibleEvaluationProvider:
+    settings = settings or get_settings()
+    provider_name = provider_name.strip().lower()
+    allowed = {
+        "alibaba": settings.alibaba_generation_model_list,
+        "deepseek": settings.deepseek_generation_model_list,
+    }
+    if provider_name not in allowed:
+        raise ValueError(f"Unsupported evaluation generation provider: {provider_name}")
+    selected_model = model or (allowed[provider_name][0] if allowed[provider_name] else "")
+    if selected_model not in allowed[provider_name]:
+        raise ValueError(
+            f"Model {selected_model!r} is not allowed for provider {provider_name}."
+        )
+    if provider_name == "alibaba":
+        return AlibabaEvaluationProvider(settings, model=selected_model)
+    return OpenAICompatibleEvaluationProvider(
+        name="deepseek",
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
+        model=selected_model,
+        timeout=settings.table_repair_timeout_seconds,
+    )

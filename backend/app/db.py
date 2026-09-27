@@ -23,6 +23,7 @@ async def init_db() -> None:
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS fiscal_year INTEGER",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS document_type VARCHAR(50)",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS language VARCHAR(20)",
+            "ALTER TABLE evaluation_cases ADD COLUMN IF NOT EXISTS generation_metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
         ):
             await connection.execute(text(ddl))
         await connection.execute(

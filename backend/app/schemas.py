@@ -455,6 +455,7 @@ class EvaluationCaseSummary(BaseModel):
     required_evidence: list[EvaluationEvidenceTarget]
     scope: dict[str, Any]
     tags: list[str]
+    generation_metadata: dict[str, Any]
     difficulty: str
     source: str
     status: str
@@ -478,11 +479,31 @@ class EvaluationDatasetDetail(EvaluationDatasetSummary):
     cases: list[EvaluationCaseSummary]
 
 
+class EvaluationScenarioMix(BaseModel):
+    single_document: int = Field(default=0, ge=0, le=30)
+    cross_year: int = Field(default=0, ge=0, le=30)
+    cross_document: int = Field(default=0, ge=0, le=30)
+
+    @model_validator(mode="after")
+    def validate_total(self):
+        total = self.single_document + self.cross_year + self.cross_document
+        if total < 1 or total > 30:
+            raise ValueError("Scenario mix must request between 1 and 30 cases.")
+        return self
+
+
 class EvaluationGenerateRequest(BaseModel):
     count: int = Field(default=10, ge=1, le=30)
     language: Literal["en", "zh"] = "en"
     difficulty: Literal["easy", "medium", "hard", "mixed"] = "mixed"
     include_insufficient: bool = False
+    scenario_mix: EvaluationScenarioMix | None = None
+    generation_provider: Literal["alibaba", "deepseek"] = "alibaba"
+    generation_model: str | None = Field(default=None, max_length=100)
+    document_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    years: list[int] = Field(default_factory=list, max_length=10)
+    company: str | None = Field(default=None, max_length=200)
+    allow_calculations: bool = True
 
 
 class EvaluationImportResponse(BaseModel):

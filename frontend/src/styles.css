@@ -623,7 +623,7 @@ tbody tr.total { background: #e9eef0; font-weight: 750; }
 .evaluation-dataset-title p { margin: 5px 0 0; color: #6f7c82; font-size: 11px; }
 .evaluation-actions { margin-top: 14px; padding: 10px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border-block: 1px solid #dce2e4; }
 .evaluation-actions select { height: 38px; padding: 0 9px; color: #344249; background: #fff; border: 1px solid #cbd3d6; border-radius: 5px; font-size: 10px; }
-.evaluation-builders { padding: 14px 0; display: grid; grid-template-columns: minmax(260px, 0.65fr) minmax(380px, 1.35fr); gap: 22px; border-bottom: 1px solid #dce2e4; }
+.evaluation-builders { padding: 14px 0; display: grid; grid-template-columns: minmax(380px, 1fr) minmax(380px, 1fr); gap: 22px; border-bottom: 1px solid #dce2e4; }
 .evaluation-builders h4 { margin: 0 0 9px; color: #4b595f; font-size: 10px; text-transform: uppercase; }
 .evaluation-generator { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .evaluation-generator label { display: grid; gap: 4px; color: #69777d; font-size: 9px; font-weight: 700; }
@@ -642,6 +642,7 @@ tbody tr.total { background: #e9eef0; font-weight: 750; }
 .evaluation-case-list strong { color: #344249; font-size: 11px; }
 .evaluation-case-list p { margin: 5px 0; color: #58666c; font-size: 10px; line-height: 1.5; }
 .evaluation-case-list small { display: block; color: #7b878c; font-size: 8px; text-transform: uppercase; }
+.evaluation-case-list .generation-meta { margin-top: 4px; color: #286f63; }
 .evaluation-case-list code { display: block; margin-top: 5px; color: #8a5966; font-size: 8px; overflow-wrap: anywhere; }
 .case-review { height: 29px; padding: 0 9px; color: #7a5b00; background: #fff9df; border: 1px solid #e5d18b; border-radius: 4px; font-size: 9px; font-weight: 750; }
 .case-review.approved { color: #176957; background: #e2f2ed; border-color: #a9d7ca; }

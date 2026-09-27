@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     alibaba_rerank_model: str = "qwen3-rerank"
     alibaba_rerank_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
     alibaba_evaluation_model: str = "qwen3.8-flash"
+    alibaba_generation_models: str = "qwen3.8-flash"
     retrieval_lexical_top_k: int = 20
     retrieval_vector_top_k: int = 20
     retrieval_rrf_top_k: int = 20
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_vision_model: str = "deepseek-flash"
     deepseek_chat_model: str = "deepseek-chat"
+    deepseek_generation_models: str = "deepseek-chat"
     openai_compatible_api_key: str = ""
     openai_compatible_base_url: str = ""
     openai_compatible_vision_model: str = ""
@@ -42,6 +44,14 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [value.strip() for value in self.cors_origins.split(",") if value.strip()]
+
+    @property
+    def alibaba_generation_model_list(self) -> list[str]:
+        return [value.strip() for value in self.alibaba_generation_models.split(",") if value.strip()]
+
+    @property
+    def deepseek_generation_model_list(self) -> list[str]:
+        return [value.strip() for value in self.deepseek_generation_models.split(",") if value.strip()]
 
 
 @lru_cache

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import hashlib
+import operator
 import re
 import time
 import unicodedata
@@ -12,7 +14,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.evaluation.metrics import aggregate_metrics, evidence_target_matches, score_case
-from app.evaluation.provider import AlibabaEvaluationProvider
+from app.evaluation.provider import (
+    GENERATION_PROMPT_VERSION,
+    AlibabaEvaluationProvider,
+    GeneratedCalculation,
+    create_generation_provider,
+)
 from app.models import (
     Chunk,
     Document,
@@ -42,6 +49,60 @@ def numeric_tokens(value: str) -> set[str]:
     }
 
 
+def semantic_identity(chunk: Chunk) -> str | None:
+    metadata = chunk.metadata_json or {}
+    title = metadata.get("table_title") or metadata.get("section_title") or ""
+    row = metadata.get("row_label") or metadata.get("fact_label") or ""
+    if not row and chunk.comparison_key and ":" in chunk.comparison_key:
+        row = chunk.comparison_key.rsplit(":", 1)[-1]
+    normalized = re.sub(r"[^a-z0-9]+", " ", f"{chunk.chunk_type} {title} {row}".lower()).strip()
+    return normalized or None
+
+
+def _evaluate_expression(expression: str) -> float:
+    operations = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.USub: operator.neg,
+        ast.UAdd: operator.pos,
+    }
+
+    def evaluate(node: ast.AST) -> float:
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, ast.BinOp) and type(node.op) in operations:
+            return operations[type(node.op)](evaluate(node.left), evaluate(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in operations:
+            return operations[type(node.op)](evaluate(node.operand))
+        raise ValueError("Calculation contains unsupported syntax.")
+
+    return evaluate(ast.parse(expression, mode="eval"))
+
+
+def validated_calculation_tokens(
+    calculations: list[GeneratedCalculation], source_numbers: set[str]
+) -> set[str]:
+    results = set()
+    for calculation in calculations:
+        operands = numeric_tokens(calculation.expression)
+        if not operands or not operands.issubset(source_numbers):
+            raise ValueError("Calculation uses a number that is absent from its evidence.")
+        result_tokens = numeric_tokens(calculation.result)
+        if len(result_tokens) != 1:
+            raise ValueError("Calculation result must contain exactly one number.")
+        result_token = next(iter(result_tokens))
+        expected = float(result_token.rstrip("%"))
+        actual = _evaluate_expression(calculation.expression.replace("%", "").replace(",", ""))
+        if abs(actual - expected) > max(1e-6, abs(expected) * 1e-4):
+            raise ValueError("Calculation result does not match its expression.")
+        results.add(result_token)
+    return results
+
+
 def _case_response(case: EvaluationCase) -> dict:
     return {
         "id": case.id,
@@ -53,6 +114,7 @@ def _case_response(case: EvaluationCase) -> dict:
         "required_evidence": case.required_evidence_json,
         "scope": case.scope_json,
         "tags": case.tags_json,
+        "generation_metadata": case.generation_metadata_json,
         "difficulty": case.difficulty,
         "source": case.source,
         "status": case.status,
@@ -72,65 +134,62 @@ class EvaluationService:
         language: str,
         difficulty: str,
         include_insufficient: bool,
+        scenario_mix: dict | None,
+        generation_provider: str,
+        generation_model: str | None,
+        document_ids: list[UUID],
+        years: list[int],
+        company: str | None,
+        allow_calculations: bool,
         session: AsyncSession,
     ) -> list[EvaluationCase]:
-        source_count = count - 1 if include_insufficient and count > 1 else count
+        requested = scenario_mix or {
+            "single_document": count - 1 if include_insufficient and count > 1 else count,
+            "cross_year": 0,
+            "cross_document": 0,
+        }
+        provider = create_generation_provider(generation_provider, generation_model)
+        statement = (
+            select(Chunk, Document)
+            .join(Document, Document.id == Chunk.document_id)
+            .where(
+                Document.knowledge_base_id == dataset.knowledge_base_id,
+                Document.status == "READY",
+                or_(
+                    Chunk.representation.in_(["SEMANTIC_ROW", "SUMMARY"]),
+                    Chunk.chunk_type.in_(["FACT", "SECTION"]),
+                ),
+            )
+        )
+        if document_ids:
+            statement = statement.where(Document.id.in_(document_ids))
+        if years:
+            statement = statement.where(Document.fiscal_year.in_(years))
+        if company:
+            statement = statement.where(Document.company.ilike(company.strip()))
         rows = list(
             (
                 await session.execute(
-                    select(Chunk, Document)
-                    .join(Document, Document.id == Chunk.document_id)
-                    .where(
-                        Document.knowledge_base_id == dataset.knowledge_base_id,
-                        Document.status == "READY",
-                        or_(
-                            Chunk.representation.in_(["SEMANTIC_ROW", "SUMMARY"]),
-                            Chunk.chunk_type.in_(["FACT", "SECTION"]),
-                        ),
+                    statement.order_by(
+                        Chunk.chunk_type, Document.created_at, Chunk.page_number, Chunk.id
                     )
-                    .order_by(Chunk.chunk_type, Document.created_at, Chunk.page_number, Chunk.id)
                 )
             ).all()
         )
         if not rows:
             raise ValueError("The knowledge base has no indexed evidence suitable for generation.")
 
-        groups: dict[str, list[tuple[Chunk, Document]]] = {}
-        for chunk, document in rows:
-            groups.setdefault(chunk.chunk_type, []).append((chunk, document))
-        selected: list[tuple[Chunk, Document]] = []
-        group_names = sorted(groups)
-        offsets = {name: 0 for name in group_names}
-        while len(selected) < min(source_count, len(rows)):
-            added = False
-            for name in group_names:
-                index = offsets[name]
-                if index < len(groups[name]):
-                    selected.append(groups[name][index])
-                    offsets[name] += 1
-                    added = True
-                    if len(selected) >= source_count:
-                        break
-            if not added:
-                break
-
-        sources = [
-            {
-                "source_index": index,
-                "filename": document.filename,
-                "page": chunk.page_number,
-                "chunk_type": chunk.chunk_type,
-                "content": chunk.content,
-            }
-            for index, (chunk, document) in enumerate(selected)
-        ]
+        bundles = self._build_evidence_bundles(rows, requested, years)
+        if not bundles:
+            raise ValueError("No evidence bundles matched the requested generation scenarios.")
         generated = []
-        for start in range(0, len(sources), 10):
+        for start in range(0, len(bundles), 6):
             generated.extend(
-                await self.provider.generate_questions(
-                    sources[start : start + 10],
+                await provider.generate_questions(
+                    [bundle["payload"] for bundle in bundles[start : start + 6]],
                     language=language,
                     difficulty=difficulty,
+                    allow_calculations=allow_calculations,
                 )
             )
 
@@ -143,25 +202,45 @@ class EvaluationService:
             ).scalars()
         }
         cases: list[EvaluationCase] = []
-        used_sources: set[int] = set()
+        used_bundles: set[int] = set()
         for item in generated:
-            if item.source_index >= len(selected) or item.source_index in used_sources:
+            if item.bundle_index >= len(bundles) or item.bundle_index in used_bundles:
                 continue
-            chunk, document = selected[item.source_index]
+            bundle = bundles[item.bundle_index]
+            scenario_type = bundle["scenario_type"]
+            if item.scenario_type.upper() != scenario_type:
+                continue
+            expected_source_ids = {source["source_id"] for source in bundle["payload"]["sources"]}
+            if set(item.source_ids_used) != expected_source_ids:
+                continue
+            documents = {str(document.id): document for chunk, document in bundle["rows"]}
+            if scenario_type != "SINGLE_DOCUMENT" and len(documents) < 2:
+                continue
+            bundle_years = sorted(
+                {document.fiscal_year for chunk, document in bundle["rows"] if document.fiscal_year}
+            )
+            if scenario_type == "CROSS_YEAR":
+                if len(bundle_years) < 2:
+                    continue
+                question_and_answer = f"{item.question} {item.expected_answer}"
+                if not all(str(year) in question_and_answer for year in bundle_years):
+                    continue
+            source_numbers = set().union(
+                *(numeric_tokens(chunk.content) for chunk, document in bundle["rows"])
+            )
+            try:
+                calculated_numbers = validated_calculation_tokens(item.calculations, source_numbers)
+            except (ValueError, SyntaxError, ZeroDivisionError):
+                continue
             expected_numbers = numeric_tokens(item.expected_answer)
-            if expected_numbers and not expected_numbers.issubset(numeric_tokens(chunk.content)):
+            if expected_numbers and not expected_numbers.issubset(
+                source_numbers | calculated_numbers
+            ):
                 continue
             normalized = normalize_question(item.question)
             if normalized in existing:
                 continue
-            target = {
-                "document_sha256": document.source_sha256,
-                "filename": document.filename,
-                "page": chunk.page_number,
-                "comparison_key": chunk.comparison_key,
-                "content_hash": content_hash(chunk.content),
-                "chunk_id": str(chunk.id),
-            }
+            targets = [self._evidence_target(chunk, document) for chunk, document in bundle["rows"]]
             case = EvaluationCase(
                 id=uuid.uuid4(),
                 dataset_id=dataset.id,
@@ -169,16 +248,38 @@ class EvaluationService:
                 expected_answer=item.expected_answer.strip(),
                 language=language,
                 expected_insufficient=False,
-                required_evidence_json=[target],
+                required_evidence_json=targets,
                 scope_json={},
-                tags_json=list(dict.fromkeys(item.tags))[:20],
+                tags_json=list(
+                    dict.fromkeys([scenario_type.lower().replace("_", "-"), *item.tags])
+                )[:20],
+                generation_metadata_json={
+                    "scenario_type": scenario_type,
+                    "provider": provider.name,
+                    "model": provider.model,
+                    "prompt_version": GENERATION_PROMPT_VERSION,
+                    "source_document_ids": list(documents),
+                    "source_years": bundle_years,
+                    "calculations": [value.model_dump() for value in item.calculations],
+                    "validation": {
+                        "unique_documents": len(documents),
+                        "numeric_provenance": True,
+                        "all_sources_used": True,
+                    },
+                },
                 difficulty=item.difficulty if item.difficulty in {"easy", "medium", "hard"} else "medium",
                 source="AI",
                 status="DRAFT",
             )
             cases.append(case)
             existing.add(normalized)
-            used_sources.add(item.source_index)
+            used_bundles.add(item.bundle_index)
+
+        if not cases:
+            raise ValueError(
+                "The model returned no cases that passed grounding validation. "
+                "Try another model or narrower document, company, and year filters."
+            )
 
         if include_insufficient:
             negative = EvaluationCase(
@@ -199,6 +300,12 @@ class EvaluationService:
                 required_evidence_json=[],
                 scope_json={},
                 tags_json=["insufficient-evidence", "negative"],
+                generation_metadata_json={
+                    "scenario_type": "INSUFFICIENT_EVIDENCE",
+                    "provider": provider.name,
+                    "model": provider.model,
+                    "prompt_version": GENERATION_PROMPT_VERSION,
+                },
                 difficulty="easy",
                 source="AI",
                 status="DRAFT",
@@ -211,6 +318,148 @@ class EvaluationService:
         for case in cases:
             await session.refresh(case)
         return cases
+
+    def _evidence_target(self, chunk: Chunk, document: Document) -> dict:
+        return {
+            "document_sha256": document.source_sha256,
+            "filename": document.filename,
+            "page": chunk.page_number,
+            "comparison_key": chunk.comparison_key,
+            "content_hash": content_hash(chunk.content),
+            "chunk_id": str(chunk.id),
+        }
+
+    def _source_payload(self, source_id: str, chunk: Chunk, document: Document) -> dict:
+        return {
+            "source_id": source_id,
+            "document_id": str(document.id),
+            "filename": document.filename,
+            "company": document.company,
+            "fiscal_year": document.fiscal_year,
+            "document_type": document.document_type,
+            "page": chunk.page_number,
+            "chunk_type": chunk.chunk_type,
+            "table_title": chunk.metadata_json.get("table_title"),
+            "row_label": chunk.metadata_json.get("row_label"),
+            "content": chunk.content,
+        }
+
+    def _build_evidence_bundles(
+        self,
+        rows: list[tuple[Chunk, Document]],
+        requested: dict,
+        requested_years: list[int],
+    ) -> list[dict]:
+        bundles: list[dict] = []
+        used_signatures: set[tuple[str, ...]] = set()
+
+        type_groups: dict[str, list[tuple[Chunk, Document]]] = {}
+        for row in rows:
+            type_groups.setdefault(row[0].chunk_type, []).append(row)
+        single_rows: list[tuple[Chunk, Document]] = []
+        offsets = {name: 0 for name in sorted(type_groups)}
+        while len(single_rows) < requested.get("single_document", 0):
+            added = False
+            for name in sorted(type_groups):
+                index = offsets[name]
+                if index < len(type_groups[name]):
+                    single_rows.append(type_groups[name][index])
+                    offsets[name] += 1
+                    added = True
+                    if len(single_rows) >= requested.get("single_document", 0):
+                        break
+            if not added:
+                break
+        for row in single_rows:
+            bundles.append(self._bundle("SINGLE_DOCUMENT", [row], len(bundles)))
+
+        comparable = [
+            row
+            for row in rows
+            if row[1].fiscal_year
+            and semantic_identity(row[0])
+            and row[0].chunk_type not in {"TABLE_SUMMARY", "SECTION"}
+        ]
+        year_groups: dict[tuple[str, str, str], list[tuple[Chunk, Document]]] = {}
+        for chunk, document in comparable:
+            key = (
+                (document.company or "").strip().lower(),
+                (document.document_type or "").strip().lower(),
+                semantic_identity(chunk) or "",
+            )
+            year_groups.setdefault(key, []).append((chunk, document))
+        for values in year_groups.values():
+            if requested.get("cross_year", 0) <= 0:
+                break
+            candidates_by_year: dict[int, list[tuple[Chunk, Document]]] = {}
+            for value in values:
+                candidates_by_year.setdefault(value[1].fiscal_year, []).append(value)
+            by_year = {
+                year: candidates[0]
+                for year, candidates in candidates_by_year.items()
+                if len(candidates) == 1
+            }
+            available = sorted(set(requested_years) & set(by_year) if requested_years else by_year)
+            if len(available) < 2:
+                continue
+            chosen_years = available if requested_years else available[-2:]
+            selected = [by_year[year] for year in chosen_years]
+            signature = tuple(sorted(str(document.id) for chunk, document in selected)) + (
+                semantic_identity(selected[0][0]) or "",
+            )
+            if signature in used_signatures:
+                continue
+            bundles.append(self._bundle("CROSS_YEAR", selected, len(bundles)))
+            used_signatures.add(signature)
+            if sum(bundle["scenario_type"] == "CROSS_YEAR" for bundle in bundles) >= requested.get("cross_year", 0):
+                break
+
+        identity_groups: dict[str, list[tuple[Chunk, Document]]] = {}
+        for row in comparable:
+            identity_groups.setdefault(semantic_identity(row[0]) or "", []).append(row)
+        for values in identity_groups.values():
+            if requested.get("cross_document", 0) <= 0:
+                break
+            candidates_by_document: dict[UUID, list[tuple[Chunk, Document]]] = {}
+            for value in values:
+                candidates_by_document.setdefault(value[1].id, []).append(value)
+            distinct = {
+                document_id: candidates[0]
+                for document_id, candidates in candidates_by_document.items()
+                if len(candidates) == 1
+            }
+            if len(distinct) < 2:
+                continue
+            selected = list(distinct.values())[:2]
+            signature = tuple(sorted(str(document.id) for chunk, document in selected)) + (
+                semantic_identity(selected[0][0]) or "",
+            )
+            if signature in used_signatures:
+                continue
+            bundles.append(self._bundle("CROSS_DOCUMENT", selected, len(bundles)))
+            used_signatures.add(signature)
+            if sum(bundle["scenario_type"] == "CROSS_DOCUMENT" for bundle in bundles) >= requested.get("cross_document", 0):
+                break
+        return bundles
+
+    def _bundle(
+        self,
+        scenario_type: str,
+        rows: list[tuple[Chunk, Document]],
+        bundle_index: int,
+    ) -> dict:
+        return {
+            "scenario_type": scenario_type,
+            "rows": rows,
+            "payload": {
+                "bundle_index": bundle_index,
+                "scenario_type": scenario_type,
+                "sources": [
+                    self._source_payload(f"S{index}", chunk, document)
+                    for index, (chunk, document) in enumerate(rows, start=1)
+                ],
+            },
+        }
 
     async def _expected_evidence(
         self,

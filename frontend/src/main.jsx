@@ -823,7 +823,12 @@ function EvaluationWorkspace({ knowledgeBaseId, knowledgeBaseName, onError }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newDataset, setNewDataset] = useState({ name: "", description: "" });
   const [manual, setManual] = useState({ question: "", expected_answer: "", language: "en", expected_insufficient: false, filename: "", page: "", comparison_key: "", tags: "" });
-  const [generator, setGenerator] = useState({ count: 10, language: "en", difficulty: "mixed", include_insufficient: true });
+  const [generationProviders, setGenerationProviders] = useState([]);
+  const [generator, setGenerator] = useState({
+    single_document: 5, cross_year: 3, cross_document: 2,
+    language: "en", difficulty: "mixed", include_insufficient: true,
+    provider_key: "", years: "", company: "", allow_calculations: true,
+  });
   const [runMode, setRunMode] = useState("PRODUCTION");
 
   async function loadDatasets(preferredId) {
@@ -840,7 +845,14 @@ function EvaluationWorkspace({ knowledgeBaseId, knowledgeBaseName, onError }) {
   }
 
   useEffect(() => {
-    Promise.all([loadDatasets(), loadRuns()]).catch((error) => onError(error.message));
+    Promise.all([
+      loadDatasets(), loadRuns(),
+      api("/api/evaluation/generation-providers").then((rows) => {
+        setGenerationProviders(rows);
+        const preferred = rows.find((item) => item.available) || rows[0];
+        if (preferred) setGenerator((current) => ({ ...current, provider_key: `${preferred.provider}::${preferred.model}` }));
+      }),
+    ]).catch((error) => onError(error.message));
   }, [knowledgeBaseId]);
 
   useEffect(() => {
@@ -913,8 +925,23 @@ function EvaluationWorkspace({ knowledgeBaseId, knowledgeBaseName, onError }) {
 
   function generateCases() {
     act(async () => {
+      const [generation_provider, generation_model] = generator.provider_key.split("::");
+      const years = generator.years.split(",").map((value) => Number(value.trim())).filter((value) => Number.isInteger(value));
+      const scenario_mix = {
+        single_document: generator.single_document,
+        cross_year: generator.cross_year,
+        cross_document: generator.cross_document,
+      };
       await api(`/api/evaluation/datasets/${dataset.id}/generate`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(generator),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          count: Object.values(scenario_mix).reduce((sum, value) => sum + value, 0),
+          scenario_mix, generation_provider, generation_model,
+          language: generator.language, difficulty: generator.difficulty,
+          include_insufficient: generator.include_insufficient,
+          years, company: generator.company.trim() || null,
+          allow_calculations: generator.allow_calculations,
+        }),
       });
       setDataset(await api(`/api/evaluation/datasets/${dataset.id}`));
       await loadDatasets(dataset.id);
@@ -996,16 +1023,27 @@ function EvaluationWorkspace({ knowledgeBaseId, knowledgeBaseName, onError }) {
               <>
                 <div className="evaluation-dataset-title"><div><h3>{dataset.name} <span>v{dataset.version}</span></h3><p>{dataset.description || "No description"}</p></div><span className={`status ${dataset.status === "PUBLISHED" ? "ready" : "pending"}`}>{dataset.status}</span></div>
                 <div className="evaluation-actions">
-                  {dataset.status === "DRAFT" ? <><button className="secondary-button" onClick={generateCases} disabled={busy}><Sparkles size={15} /> Generate with Qwen</button><input ref={importRef} type="file" accept=".json,.csv" hidden onChange={(event) => importCases(event.target.files?.[0])} /><button className="secondary-button" onClick={() => importRef.current?.click()} disabled={busy}><Upload size={15} /> Import JSON/CSV</button><button className="primary-button" onClick={publishDataset} disabled={busy || dataset.approved_case_count === 0}><ShieldCheck size={15} /> Publish</button></> : <><button className="secondary-button" onClick={cloneDataset} disabled={busy}><Copy size={15} /> Clone new version</button><select value={runMode} onChange={(event) => setRunMode(event.target.value)}><option>PRODUCTION</option><option>SEMANTIC</option><option>BASELINE</option></select><button className="primary-button" onClick={startRun} disabled={busy}><Play size={15} /> Run evaluation</button></>}
+                  {dataset.status === "DRAFT" ? <><button className="secondary-button" onClick={generateCases} disabled={busy || !generator.provider_key}><Sparkles size={15} /> Generate test cases</button><input ref={importRef} type="file" accept=".json,.csv" hidden onChange={(event) => importCases(event.target.files?.[0])} /><button className="secondary-button" onClick={() => importRef.current?.click()} disabled={busy}><Upload size={15} /> Import JSON/CSV</button><button className="primary-button" onClick={publishDataset} disabled={busy || dataset.approved_case_count === 0}><ShieldCheck size={15} /> Publish</button></> : <><button className="secondary-button" onClick={cloneDataset} disabled={busy}><Copy size={15} /> Clone new version</button><select value={runMode} onChange={(event) => setRunMode(event.target.value)}><option>PRODUCTION</option><option>SEMANTIC</option><option>BASELINE</option></select><button className="primary-button" onClick={startRun} disabled={busy}><Play size={15} /> Run evaluation</button></>}
                 </div>
                 {dataset.status === "DRAFT" && (
                   <div className="evaluation-builders">
-                    <section><h4>AI generation</h4><div className="evaluation-generator"><label>Cases<input type="number" min="1" max="30" value={generator.count} onChange={(event) => setGenerator({ ...generator, count: Number(event.target.value) })} /></label><label>Language<select value={generator.language} onChange={(event) => setGenerator({ ...generator, language: event.target.value })}><option value="en">English</option><option value="zh">中文</option></select></label><label>Difficulty<select value={generator.difficulty} onChange={(event) => setGenerator({ ...generator, difficulty: event.target.value })}><option value="mixed">Mixed</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label><label className="check-label"><input type="checkbox" checked={generator.include_insufficient} onChange={(event) => setGenerator({ ...generator, include_insufficient: event.target.checked })} /> Include insufficient</label></div></section>
+                    <section><h4>AI generation</h4><div className="evaluation-generator">
+                      <label>Model<select value={generator.provider_key} onChange={(event) => setGenerator({ ...generator, provider_key: event.target.value })}>{generationProviders.map((item) => <option key={`${item.provider}:${item.model}`} value={`${item.provider}::${item.model}`} disabled={!item.available}>{item.display_name} · {item.model}{item.available ? "" : " (key missing)"}</option>)}</select></label>
+                      <label>Language<select value={generator.language} onChange={(event) => setGenerator({ ...generator, language: event.target.value })}><option value="en">English</option><option value="zh">中文</option></select></label>
+                      <label>Difficulty<select value={generator.difficulty} onChange={(event) => setGenerator({ ...generator, difficulty: event.target.value })}><option value="mixed">Mixed</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>
+                      <label>Single-document<input type="number" min="0" max="30" value={generator.single_document} onChange={(event) => setGenerator({ ...generator, single_document: Number(event.target.value) })} /></label>
+                      <label>Cross-year<input type="number" min="0" max="30" value={generator.cross_year} onChange={(event) => setGenerator({ ...generator, cross_year: Number(event.target.value) })} /></label>
+                      <label>Cross-document<input type="number" min="0" max="30" value={generator.cross_document} onChange={(event) => setGenerator({ ...generator, cross_document: Number(event.target.value) })} /></label>
+                      <label>Years, comma separated<input placeholder="2024, 2025" value={generator.years} onChange={(event) => setGenerator({ ...generator, years: event.target.value })} /></label>
+                      <label>Company<input placeholder="AIA Group" value={generator.company} onChange={(event) => setGenerator({ ...generator, company: event.target.value })} /></label>
+                      <label className="check-label"><input type="checkbox" checked={generator.allow_calculations} onChange={(event) => setGenerator({ ...generator, allow_calculations: event.target.checked })} /> Allow derived calculations</label>
+                      <label className="check-label"><input type="checkbox" checked={generator.include_insufficient} onChange={(event) => setGenerator({ ...generator, include_insufficient: event.target.checked })} /> Include insufficient-evidence case</label>
+                    </div></section>
                     <form onSubmit={addManualCase}><h4>Manual case</h4><textarea required placeholder="Question" value={manual.question} onChange={(event) => setManual({ ...manual, question: event.target.value })} /><textarea required placeholder="Expected answer" value={manual.expected_answer} onChange={(event) => setManual({ ...manual, expected_answer: event.target.value })} /><div><select value={manual.language} onChange={(event) => setManual({ ...manual, language: event.target.value })}><option value="en">English</option><option value="zh">中文</option></select><input placeholder="Filename" value={manual.filename} onChange={(event) => setManual({ ...manual, filename: event.target.value })} /><input type="number" min="1" placeholder="Page" value={manual.page} onChange={(event) => setManual({ ...manual, page: event.target.value })} /><input placeholder="Comparison key" value={manual.comparison_key} onChange={(event) => setManual({ ...manual, comparison_key: event.target.value })} /><input placeholder="Tags, comma separated" value={manual.tags} onChange={(event) => setManual({ ...manual, tags: event.target.value })} /></div><label className="manual-insufficient"><input type="checkbox" checked={manual.expected_insufficient} onChange={(event) => setManual({ ...manual, expected_insufficient: event.target.checked })} /> Expected answer is insufficient evidence</label><button className="secondary-button" disabled={busy}><Plus size={15} /> Add draft case</button></form>
                   </div>
                 )}
                 <div className="evaluation-case-list">
-                  {dataset.cases.map((item, index) => <article key={item.id}><div className="case-index">{String(index + 1).padStart(2, "0")}</div><div><strong>{item.question}</strong><p>{item.expected_answer}</p><small>{item.source} · {item.language} · {item.difficulty} · {(item.tags || []).join(", ") || "untagged"}</small>{item.required_evidence.map((target, targetIndex) => <code key={targetIndex}>{target.filename || "any file"} · p.{target.page || "any"} · {target.comparison_key || target.chunk_id || "locator pending"}</code>)}</div>{dataset.status === "DRAFT" && <button className={`case-review ${item.status === "APPROVED" ? "approved" : ""}`} onClick={() => updateCase(item.id, { status: item.status === "APPROVED" ? "DRAFT" : "APPROVED" })}>{item.status === "APPROVED" ? "Approved" : "Approve"}</button>}</article>)}
+                  {dataset.cases.map((item, index) => <article key={item.id}><div className="case-index">{String(index + 1).padStart(2, "0")}</div><div><strong>{item.question}</strong><p>{item.expected_answer}</p><small>{item.source} · {item.language} · {item.difficulty} · {(item.tags || []).join(", ") || "untagged"}</small>{item.generation_metadata?.scenario_type && <small className="generation-meta">{item.generation_metadata.scenario_type} · {item.generation_metadata.provider}/{item.generation_metadata.model} · years {(item.generation_metadata.source_years || []).join(", ") || "n/a"}</small>}{item.required_evidence.map((target, targetIndex) => <code key={targetIndex}>{target.filename || "any file"} · p.{target.page || "any"} · {target.comparison_key || target.chunk_id || "locator pending"}</code>)}</div>{dataset.status === "DRAFT" && <button className={`case-review ${item.status === "APPROVED" ? "approved" : ""}`} onClick={() => updateCase(item.id, { status: item.status === "APPROVED" ? "DRAFT" : "APPROVED" })}>{item.status === "APPROVED" ? "Approved" : "Approve"}</button>}</article>)}
                 </div>
               </>
             )}

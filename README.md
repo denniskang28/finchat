@@ -36,7 +36,7 @@ Semantic embeddings include company, fiscal year, document type, and report titl
 
 The knowledge-base screen is the QA workspace. Its left side contains the conversation, answers, and citations; its right side exposes every retrieval stage and the exact final evidence sent to DeepSeek. `Retrieve Again` creates a new retrieval snapshot without changing the existing answer. `Regenerate Answer` calls DeepSeek again with the current snapshot without rerunning retrieval.
 
-Use `Evaluation` in the sidebar to create versioned test sets manually, import JSON/CSV cases, or generate grounded draft cases with Qwen. Cases must be approved before a test set can be published. Published versions are immutable; clone one to make the next version. Evaluation runs execute asynchronously through the worker and retain per-case retrieval traces, final evidence, DeepSeek answers, citations, deterministic finance checks, and Qwen Judge output. See `docs/evaluation-design.md`.
+Use `Evaluation` in the sidebar to create versioned test sets manually, import JSON/CSV cases, or generate grounded single-document, cross-year, and cross-document draft cases with an allowed Qwen or DeepSeek model. Cases must be approved before a test set can be published. Published versions are immutable; clone one to make the next version. Evaluation runs execute asynchronously through the worker and retain per-case retrieval traces, final evidence, DeepSeek answers, citations, deterministic finance checks, and Qwen Judge output. See `docs/evaluation-design.md`.
 
 The worker is horizontally scalable because jobs are claimed with PostgreSQL `FOR UPDATE SKIP LOCKED`:
 
