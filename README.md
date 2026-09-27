@@ -1,6 +1,6 @@
 # Semantic Table RAG POC
 
-This repository implements PDF ingestion, layout-aware content extraction, table extraction, evidence-backed repair, and chunk inspection. It does not implement embeddings, retrieval, reranking, or answer generation.
+This repository implements PDF ingestion, layout-aware content extraction, table extraction, evidence-backed repair, chunk inspection, and a baseline-versus-semantic retrieval experiment. It does not implement answer generation.
 
 Every page uses the same LLM-primary, evidence-verified pipeline; there are no page-number or document-specific parser branches:
 
@@ -11,6 +11,8 @@ Every page uses the same LLM-primary, evidence-verified pipeline; there are no p
 5. A rejected or unavailable page-level result falls back to the existing `pdfplumber` extraction and evidence-backed table repair pipeline, with the reason shown in debug warnings.
 6. Raw extraction and canonical LLM structures remain available side by side in the debug UI.
 7. Each page emits a hierarchy of `PAGE_SUMMARY`, `SECTION`, and `FACT` chunks. Important-token coverage exposes headings and numbers that were not assigned to any accepted structure.
+8. Retrieval indexes `TEXT`, `TABLE_SUMMARY`, `RAW_ROW`, and `SEMANTIC_ROW` chunks with Alibaba Cloud embeddings in PostgreSQL pgvector.
+9. The retrieval debugger exposes lexical top 20, vector top 20, RRF top 20, and Alibaba reranker top 6 results without generating an answer.
 
 ## Run
 
@@ -25,6 +27,22 @@ docker compose up --build
 - Health check: http://localhost:8000/api/health
 
 Upload a PDF in the UI and choose either Qwen or DeepSeek. Parsing is synchronous for this POC; the AIA 2025 report remains the golden validation sample. Each document records the provider, model, and wall-clock parsing duration so equivalent uploads can be compared.
+
+Open the `Retrieval` tab for a parsed document, click `Build index`, select `Baseline` or `Semantic`, and run a query. Baseline uses `TEXT + RAW_ROW`; Semantic uses `TEXT + TABLE_SUMMARY + SEMANTIC_ROW`.
+
+## Retrieval providers
+
+Retrieval uses Alibaba Cloud Model Studio. Document and query embeddings use distinct `text_type` values through the native embedding API.
+
+```dotenv
+ALIBABA_EMBEDDING_MODEL=qwen3.7-text-embedding
+ALIBABA_EMBEDDING_DIMENSIONS=1024
+ALIBABA_EMBEDDING_URL=https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding
+ALIBABA_RERANK_MODEL=qwen3-rerank
+ALIBABA_RERANK_URL=https://dashscope.aliyuncs.com/compatible-api/v1/reranks
+```
+
+The fixed experiment is lexical top 20 + vector top 20 -> RRF (`k=60`) top 20 -> rerank -> final top 6. See `docs/retrieval-evaluation.md` for the golden-query results.
 
 ## Table repair provider
 

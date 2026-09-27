@@ -205,3 +205,86 @@ class ChunkDetail(BaseModel):
     metadata: dict[str, Any]
     embedding_dimensions: int | None
     created_at: datetime
+
+
+class RetrievalRequest(BaseModel):
+    document_id: UUID
+    query: str = Field(min_length=1, max_length=4000)
+    mode: Literal["BASELINE", "SEMANTIC"]
+
+
+class RetrievalHit(BaseModel):
+    chunk_id: UUID
+    rank: int
+    final_rank: int | None = None
+    chunk_type: str
+    representation: str
+    comparison_key: str | None
+    file: str
+    page: int
+    table_title: str | None = None
+    row_label: str | None = None
+    raw_content: str | None = None
+    semantic_content: str | None = None
+    content: str
+    vector_score: float | None = None
+    lexical_score: float | None = None
+    rrf_score: float | None = None
+    rerank_score: float | None = None
+
+
+class RetrievalDebugResponse(BaseModel):
+    original_query: str
+    retrieval_mode: Literal["BASELINE", "SEMANTIC"]
+    document_id: UUID
+    embedding_model: str
+    rerank_model: str
+    vector_results: list[RetrievalHit]
+    lexical_results: list[RetrievalHit]
+    rrf_results: list[RetrievalHit]
+    reranked_results: list[RetrievalHit]
+
+
+class IndexRequest(BaseModel):
+    force: bool = False
+
+
+class IndexResponse(BaseModel):
+    document_id: UUID
+    model: str
+    dimensions: int
+    indexed_chunks: int
+    skipped_chunks: int
+    total_indexable_chunks: int
+
+
+class GoldenQueryResult(BaseModel):
+    query_id: str
+    query: str
+    mode: Literal["BASELINE", "SEMANTIC"]
+    expected_target_ids: list[str]
+    vector_ranks: dict[str, int | None]
+    lexical_ranks: dict[str, int | None]
+    rrf_ranks: dict[str, int | None]
+    rerank_ranks: dict[str, int | None]
+    target_ranks: dict[str, int | None]
+    first_relevant_rank: int | None
+    first_complete_rank: int | None
+    hit_at_1: bool
+    hit_at_3: bool
+    hit_at_5: bool
+    reciprocal_rank: float
+    failure_stage: str | None = None
+
+
+class RetrievalMetrics(BaseModel):
+    hit_at_1: float
+    hit_at_3: float
+    hit_at_5: float
+    mrr: float
+
+
+class RetrievalEvaluationResponse(BaseModel):
+    document_id: UUID
+    results: list[GoldenQueryResult]
+    metrics: dict[Literal["BASELINE", "SEMANTIC"], RetrievalMetrics]

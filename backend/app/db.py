@@ -16,9 +16,21 @@ async def init_db() -> None:
     async with engine.begin() as connection:
         await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_chunks_search_vector_gin "
+                "ON chunks USING gin (search_vector)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_chunks_embedding_hnsw "
+                "ON chunks USING hnsw (embedding vector_cosine_ops) "
+                "WHERE embedding IS NOT NULL"
+            )
+        )
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
     async with SessionLocal() as session:
         yield session
-

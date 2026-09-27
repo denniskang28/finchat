@@ -31,6 +31,11 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       ALIBABA_BASE_URL: ${ALIBABA_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       ALIBABA_VISION_MODEL: ${ALIBABA_VISION_MODEL:-qwen3.8-flash}
+      ALIBABA_EMBEDDING_MODEL: ${ALIBABA_EMBEDDING_MODEL:-qwen3.7-text-embedding}
+      ALIBABA_EMBEDDING_DIMENSIONS: ${ALIBABA_EMBEDDING_DIMENSIONS:-1024}
+      ALIBABA_EMBEDDING_URL: ${ALIBABA_EMBEDDING_URL:-https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding}
+      ALIBABA_RERANK_MODEL: ${ALIBABA_RERANK_MODEL:-qwen3-rerank}
+      ALIBABA_RERANK_URL: ${ALIBABA_RERANK_URL:-https://dashscope.aliyuncs.com/compatible-api/v1/reranks}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       DEEPSEEK_VISION_MODEL: ${DEEPSEEK_VISION_MODEL:-deepseek-flash}

@@ -51,6 +51,29 @@ def render_markdown(table: ParsedTable) -> str:
     return "\n".join(lines)
 
 
+def render_table_summary(table: ParsedTable) -> str:
+    entity = "Chart" if table.source_kind == "CHART" else "Table"
+    lines = [f"{entity}: {table.title}."]
+    if table.subtitle:
+        lines.append(f"Scope: {table.subtitle}.")
+    for key, value in table.context.items():
+        lines.append(f"{key.replace('_', ' ').title()}: {value}.")
+    measures = []
+    for column in table.columns:
+        label = column.semantic_label
+        if column.period_label:
+            label = f"{column.period_label}, {label}"
+        if column.unit:
+            label = f"{label} ({column.unit})"
+        measures.append(label)
+    if measures:
+        lines.append("Columns: " + "; ".join(measures) + ".")
+    row_labels = [row.row_label for row in table.rows if row.row_label]
+    if row_labels:
+        lines.append("Rows: " + "; ".join(row_labels) + ".")
+    return "\n".join(lines)
+
+
 def _render_value(column: ParsedColumn, value: str) -> str:
     if column.unit == "USD billion":
         return f"USD {value} billion"

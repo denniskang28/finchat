@@ -9,6 +9,7 @@ import {
   Cpu,
   Database,
   FileText,
+  GitMerge,
   LoaderCircle,
   RefreshCw,
   Search,
@@ -395,6 +396,152 @@ function ChunkExplorer({ chunks, selectedChunkId, onSelect, detail, loading }) {
   );
 }
 
+const RETRIEVAL_STAGES = [
+  ["vector_results", "Vector"],
+  ["lexical_results", "Lexical"],
+  ["rrf_results", "RRF merged"],
+  ["reranked_results", "Reranked"],
+];
+
+function Score({ label, value }) {
+  return <span><small>{label}</small>{value == null ? "-" : value.toFixed(6)}</span>;
+}
+
+function RetrievalHit({ hit }) {
+  return (
+    <article className="retrieval-hit">
+      <header>
+        <div className="retrieval-ranks">
+          <strong>#{hit.rank}</strong>
+          <span>Final {hit.final_rank == null ? "-" : `#${hit.final_rank}`}</span>
+        </div>
+        <div className="retrieval-identity">
+          <span className={`chunk-type type-${hit.chunk_type.toLowerCase()}`}>{hit.chunk_type}</span>
+          <strong>{hit.comparison_key || hit.chunk_id}</strong>
+          <small>{hit.file} · Page {hit.page} · {hit.representation}</small>
+        </div>
+      </header>
+      <dl className="retrieval-fields">
+        <div><dt>Table title</dt><dd>{hit.table_title || "-"}</dd></div>
+        <div><dt>Row label</dt><dd>{hit.row_label || "-"}</dd></div>
+      </dl>
+      <div className="retrieval-scores">
+        <Score label="Vector" value={hit.vector_score} />
+        <Score label="Lexical" value={hit.lexical_score} />
+        <Score label="RRF" value={hit.rrf_score} />
+        <Score label="Rerank" value={hit.rerank_score} />
+      </div>
+      <div className="retrieval-content-grid">
+        <section><h4>Raw content</h4><pre>{hit.raw_content || hit.content}</pre></section>
+        <section><h4>Semantic content</h4><pre>{hit.semantic_content || hit.content}</pre></section>
+      </div>
+    </article>
+  );
+}
+
+function RetrievalDebugger({ documentId, onError }) {
+  const [query, setQuery] = useState("2025年底AIA美国公司债有多少，占公司债组合多少？");
+  const [mode, setMode] = useState("SEMANTIC");
+  const [stage, setStage] = useState("reranked_results");
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [indexing, setIndexing] = useState(false);
+  const [indexStatus, setIndexStatus] = useState(null);
+
+  async function buildIndex() {
+    setIndexing(true);
+    onError("");
+    try {
+      setIndexStatus(await api(`/api/retrieval/documents/${documentId}/index`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: false }),
+      }));
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setIndexing(false);
+    }
+  }
+
+  async function runSearch(event) {
+    event.preventDefault();
+    if (!query.trim()) return;
+    setBusy(true);
+    onError("");
+    try {
+      setResult(await api("/api/retrieval/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: documentId, query: query.trim(), mode }),
+      }));
+      setStage("reranked_results");
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const hits = result?.[stage] || [];
+  return (
+    <section className="retrieval-debugger">
+      <form className="retrieval-query" onSubmit={runSearch}>
+        <div className="retrieval-query-main">
+          <label htmlFor="retrieval-query">Query</label>
+          <div className="retrieval-query-input">
+            <Search size={17} />
+            <input id="retrieval-query" value={query} onChange={(event) => setQuery(event.target.value)} />
+          </div>
+        </div>
+        <div className="mode-control" aria-label="Retrieval mode">
+          {[
+            ["BASELINE", "Baseline"],
+            ["SEMANTIC", "Semantic"],
+          ].map(([value, label]) => (
+            <button type="button" key={value} className={mode === value ? "active" : ""} onClick={() => setMode(value)}>{label}</button>
+          ))}
+        </div>
+        <button type="button" className="secondary-button" onClick={buildIndex} disabled={indexing}>
+          {indexing ? <LoaderCircle className="spin" size={16} /> : <Database size={16} />}
+          {indexing ? "Indexing" : "Build index"}
+        </button>
+        <button type="submit" className="primary-button" disabled={busy}>
+          {busy ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}
+          {busy ? "Retrieving" : "Run retrieval"}
+        </button>
+      </form>
+      {indexStatus && (
+        <div className="index-status">
+          {indexStatus.indexed_chunks} indexed · {indexStatus.skipped_chunks} already present · {indexStatus.model} / {indexStatus.dimensions}d
+        </div>
+      )}
+      {!result ? (
+        <div className="retrieval-empty"><GitMerge size={28} /><strong>No retrieval run yet</strong></div>
+      ) : (
+        <>
+          <div className="retrieval-run-meta">
+            <span><strong>Query</strong> {result.original_query}</span>
+            <span><strong>Mode</strong> {result.retrieval_mode}</span>
+            <span><strong>Models</strong> {result.embedding_model} · {result.rerank_model}</span>
+          </div>
+          <div className="stage-tabs" role="tablist" aria-label="Retrieval pipeline stages">
+            {RETRIEVAL_STAGES.map(([id, label]) => (
+              <button type="button" role="tab" aria-selected={stage === id} className={stage === id ? "active" : ""} onClick={() => setStage(id)} key={id}>
+                {label}<span>{result[id].length}</span>
+              </button>
+            ))}
+          </div>
+          <div className="retrieval-results">
+            {hits.map((hit) => <RetrievalHit hit={hit} key={hit.chunk_id} />)}
+            {hits.length === 0 && <div className="retrieval-empty"><Search size={24} /><strong>No hits at this stage</strong></div>}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 function App() {
   const inputRef = useRef(null);
   const [documents, setDocuments] = useState([]);
@@ -644,9 +791,12 @@ function App() {
                 <button type="button" role="tab" aria-selected={viewMode === "chunks"} className={viewMode === "chunks" ? "active" : ""} onClick={() => setViewMode("chunks")}>
                   <Boxes size={16} /> Chunks <span>{chunks.length}</span>
                 </button>
+                <button type="button" role="tab" aria-selected={viewMode === "retrieval"} className={viewMode === "retrieval" ? "active" : ""} onClick={() => setViewMode("retrieval")}>
+                  <GitMerge size={16} /> Retrieval
+                </button>
               </div>
 
-              {viewMode === "tables" ? <><div className="table-toolbar">
+              {viewMode === "tables" && <><div className="table-toolbar">
                 <div>
                   <strong>Parsed tables</strong>
                   <span>
@@ -700,7 +850,8 @@ function App() {
                   </div>
                 )}
               </div>
-              </> : (
+              </>}
+              {viewMode === "chunks" && (
                 <ChunkExplorer
                   key={selectedId}
                   chunks={chunks}
@@ -709,6 +860,9 @@ function App() {
                   detail={selectedChunk}
                   loading={chunkLoading}
                 />
+              )}
+              {viewMode === "retrieval" && (
+                <RetrievalDebugger key={selectedId} documentId={selectedId} onError={setError} />
               )}
             </>
           )}

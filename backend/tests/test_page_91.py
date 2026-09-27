@@ -9,7 +9,7 @@ from app.ingestion.repair_providers import (
     TableReconstructionProposal,
     TableRepairProvider,
 )
-from app.ingestion.renderers import build_table_debug
+from app.ingestion.renderers import build_table_debug, render_table_summary
 from app.ingestion.table_quality import TableRepairPipeline
 
 
@@ -116,6 +116,10 @@ def test_page_91_united_states_values_and_representations(sample_pdf):
     assert "| United States | 6.2 | 22% |" in debug.markdown
     assert "$b: USD 6.2 billion." in semantic.content
     assert "% of total: 22%." in semantic.content
+    summary = render_table_summary(geography)
+    assert "Table: Corporate Bonds by Geography - Table 1." in summary
+    assert "Columns: Row label; $b (USD billion); % of total (%)." in summary
+    assert "Rows: Asia Pacific; United States; Other; Total." in summary
 
 
 def test_page_91_generic_reconstruction_excludes_chart_geometry(sample_pdf):

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.ingestion.parser import PdfParser
 from app.ingestion.repair_providers import create_table_repair_provider
-from app.ingestion.renderers import build_table_debug
+from app.ingestion.renderers import build_table_debug, render_table_summary
 from app.ingestion.table_quality import TableRepairPipeline
 from app.models import Chunk, Document
 
@@ -71,7 +71,6 @@ class IngestionService:
                         metadata_json={"element_type": "TEXT", "page": page_number},
                     )
                 )
-
             content_section_count = 0
             content_fact_count = 0
             content_warning_count = 0
@@ -191,6 +190,25 @@ class IngestionService:
                             "table_id": table.table_id,
                             "table_title": table.title,
                             "table_debug": debug_json,
+                        },
+                    )
+                )
+                table_summary = render_table_summary(table)
+                session.add(
+                    Chunk(
+                        document_id=document_id,
+                        page_number=table.page_number,
+                        chunk_type="TABLE_SUMMARY",
+                        representation="SUMMARY",
+                        comparison_key=f"{table.table_id}:summary",
+                        content=table_summary,
+                        raw_content=debug.markdown,
+                        semantic_content=table_summary,
+                        metadata_json={
+                            "element_type": "TABLE_SUMMARY",
+                            "table_id": table.table_id,
+                            "table_title": table.title,
+                            "source_kind": table.source_kind,
                         },
                     )
                 )
