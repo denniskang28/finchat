@@ -7,7 +7,8 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.ingestion.service import IngestionService
-from app.models import Document, IngestionJob
+from app.evaluation.service import EvaluationService
+from app.models import Document, EvaluationRun, IngestionJob
 from app.retrieval.service import RetrievalService
 
 
@@ -39,6 +40,41 @@ async def claim_job() -> UUID | None:
         job.started_at = datetime.now(UTC)
         await session.commit()
         return job.id
+
+
+async def claim_evaluation_run() -> UUID | None:
+    async with SessionLocal() as session:
+        run = (
+            await session.execute(
+                select(EvaluationRun)
+                .where(EvaluationRun.status == "PENDING")
+                .order_by(EvaluationRun.created_at)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if run is None:
+            return None
+        run.status = "RUNNING"
+        run.started_at = datetime.now(UTC)
+        run.error = None
+        await session.commit()
+        return run.id
+
+
+async def process_evaluation_run(run_id: UUID) -> None:
+    async with SessionLocal() as session:
+        try:
+            await EvaluationService().process_run(run_id, session)
+        except Exception as exc:
+            await session.rollback()
+            run = await session.get(EvaluationRun, run_id)
+            if run is None:
+                return
+            run.status = "FAILED"
+            run.error = f"{type(exc).__name__}: {exc}"
+            run.completed_at = datetime.now(UTC)
+            await session.commit()
 
 
 async def process_job(job_id: UUID) -> None:
@@ -96,6 +132,10 @@ async def process_job(job_id: UUID) -> None:
 async def run_worker() -> None:
     await init_db()
     while True:
+        evaluation_run_id = await claim_evaluation_run()
+        if evaluation_run_id is not None:
+            await process_evaluation_run(evaluation_run_id)
+            continue
         job_id = await claim_job()
         if job_id is None:
             await asyncio.sleep(settings.worker_poll_seconds)

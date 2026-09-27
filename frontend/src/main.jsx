@@ -9,15 +9,18 @@ import {
   Cpu,
   Database,
   FileText,
+  FlaskConical,
   GitMerge,
   Library,
   LoaderCircle,
   MessageSquareText,
   Plus,
+  Play,
   RefreshCw,
   Search,
   ScanSearch,
   ShieldCheck,
+  Sparkles,
   Table2,
   Upload,
   Wrench,
@@ -752,6 +755,286 @@ function QAWorkspace({ knowledgeBaseId, onError }) {
   );
 }
 
+function EvaluationResult({ result }) {
+  const [stage, setStage] = useState("reranked_results");
+  const hits = result.retrieval?.[stage] || [];
+  const metrics = result.deterministic_metrics || {};
+  return (
+    <details className={`evaluation-result ${result.failure_stage ? "failed" : "passed"}`}>
+      <summary>
+        <span>{result.failure_stage ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} />}</span>
+        <strong>{result.question}</strong>
+        <small>{result.failure_stage || "PASS"} · {formatDuration(result.latency_seconds)}</small>
+      </summary>
+      <div className="evaluation-result-body">
+        <div className="evaluation-answer-grid">
+          <section><small>Expected answer</small><p>{result.expected_answer}</p></section>
+          <section><small>Actual answer</small><p>{result.answer || result.error || "No answer"}</p></section>
+        </div>
+        <div className="evaluation-score-strip">
+          <span>Hit@1 <strong>{metrics.hit_at_1 ? "Yes" : "No"}</strong></span>
+          <span>Numbers <strong>{metrics.number_accuracy ? "Pass" : "Fail"}</strong></span>
+          <span>Units <strong>{metrics.unit_accuracy ? "Pass" : "Fail"}</strong></span>
+          <span>Periods <strong>{metrics.period_accuracy ? "Pass" : "Fail"}</strong></span>
+          <span>Citation recall <strong>{metrics.citation_recall == null ? "-" : `${Math.round(metrics.citation_recall * 100)}%`}</strong></span>
+          <span>Judge <strong>{result.judge?.correctness == null ? "-" : `${Math.round(result.judge.correctness * 100)}%`}</strong></span>
+        </div>
+        {result.citations?.length > 0 && (
+          <div className="evaluation-citations">
+            {result.citations.map((citation) => <code key={citation.chunk_id}>{citation.filename} · p.{citation.page} · {citation.chunk_id}</code>)}
+          </div>
+        )}
+        {result.retrieval && (
+          <>
+            <div className="stage-tabs" role="tablist">
+              {RETRIEVAL_STAGES.map(([id, label]) => (
+                <button type="button" key={id} className={stage === id ? "active" : ""} onClick={() => setStage(id)}>
+                  {label}<span>{result.retrieval[id]?.length || 0}</span>
+                </button>
+              ))}
+            </div>
+            <div className="evaluation-trace">{hits.map((hit) => <RetrievalHit hit={hit} key={hit.chunk_id} />)}</div>
+          </>
+        )}
+        <section className="evaluation-evidence">
+          <h4>Final evidence passed to DeepSeek</h4>
+          {(result.final_evidence || []).map((item) => (
+            <div key={item.chunk_id}><code>[E{item.evidence_number}] {item.filename} · p.{item.page} · {item.chunk_id}</code><pre>{item.content}</pre></div>
+          ))}
+        </section>
+        {result.judge?.rationale && <p className="judge-rationale"><strong>Qwen Judge:</strong> {result.judge.rationale}</p>}
+      </div>
+    </details>
+  );
+}
+
+function EvaluationWorkspace({ knowledgeBaseId, knowledgeBaseName, onError }) {
+  const importRef = useRef(null);
+  const [tab, setTab] = useState("datasets");
+  const [datasets, setDatasets] = useState([]);
+  const [selectedDatasetId, setSelectedDatasetId] = useState(null);
+  const [dataset, setDataset] = useState(null);
+  const [runs, setRuns] = useState([]);
+  const [selectedRunId, setSelectedRunId] = useState(null);
+  const [run, setRun] = useState(null);
+  const [comparisonRunId, setComparisonRunId] = useState("");
+  const [comparisonRun, setComparisonRun] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newDataset, setNewDataset] = useState({ name: "", description: "" });
+  const [manual, setManual] = useState({ question: "", expected_answer: "", language: "en", expected_insufficient: false, filename: "", page: "", comparison_key: "", tags: "" });
+  const [generator, setGenerator] = useState({ count: 10, language: "en", difficulty: "mixed", include_insufficient: true });
+  const [runMode, setRunMode] = useState("PRODUCTION");
+
+  async function loadDatasets(preferredId) {
+    const rows = await api(`/api/evaluation/knowledge-bases/${knowledgeBaseId}/datasets`);
+    setDatasets(rows);
+    setSelectedDatasetId((current) => preferredId || (rows.some((item) => item.id === current) ? current : rows[0]?.id || null));
+  }
+
+  async function loadRuns(preferredId) {
+    const rows = await api(`/api/evaluation/knowledge-bases/${knowledgeBaseId}/runs`);
+    setRuns(rows);
+    setSelectedRunId((current) => preferredId || (rows.some((item) => item.id === current) ? current : rows[0]?.id || null));
+    return rows;
+  }
+
+  useEffect(() => {
+    Promise.all([loadDatasets(), loadRuns()]).catch((error) => onError(error.message));
+  }, [knowledgeBaseId]);
+
+  useEffect(() => {
+    if (!selectedDatasetId) { setDataset(null); return; }
+    api(`/api/evaluation/datasets/${selectedDatasetId}`).then(setDataset).catch((error) => onError(error.message));
+  }, [selectedDatasetId]);
+
+  useEffect(() => {
+    if (!selectedRunId) { setRun(null); return; }
+    api(`/api/evaluation/runs/${selectedRunId}`).then(setRun).catch((error) => onError(error.message));
+  }, [selectedRunId]);
+
+  useEffect(() => {
+    if (!comparisonRunId) { setComparisonRun(null); return; }
+    api(`/api/evaluation/runs/${comparisonRunId}`).then(setComparisonRun).catch((error) => onError(error.message));
+  }, [comparisonRunId]);
+
+  useEffect(() => {
+    if (!run || !["PENDING", "RUNNING"].includes(run.status)) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const detail = await api(`/api/evaluation/runs/${run.id}`);
+        setRun(detail);
+        await loadRuns(detail.id);
+      } catch (error) { onError(error.message); }
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [run?.id, run?.status]);
+
+  async function act(callback) {
+    setBusy(true);
+    onError("");
+    try { await callback(); } catch (error) { onError(error.message); } finally { setBusy(false); }
+  }
+
+  function createDataset(event) {
+    event.preventDefault();
+    act(async () => {
+      const created = await api("/api/evaluation/datasets", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ knowledge_base_id: knowledgeBaseId, ...newDataset }),
+      });
+      setNewDataset({ name: "", description: "" });
+      setShowCreate(false);
+      await loadDatasets(created.id);
+    });
+  }
+
+  function addManualCase(event) {
+    event.preventDefault();
+    act(async () => {
+      const target = {};
+      if (manual.filename.trim()) target.filename = manual.filename.trim();
+      if (manual.page) target.page = Number(manual.page);
+      if (manual.comparison_key.trim()) target.comparison_key = manual.comparison_key.trim();
+      await api(`/api/evaluation/datasets/${dataset.id}/cases`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: manual.question, expected_answer: manual.expected_answer, language: manual.language,
+          expected_insufficient: manual.expected_insufficient,
+          required_evidence: Object.keys(target).length ? [target] : [],
+          tags: manual.tags.split(",").map((tag) => tag.trim()).filter(Boolean), status: "DRAFT",
+        }),
+      });
+      setManual({ question: "", expected_answer: "", language: manual.language, expected_insufficient: false, filename: "", page: "", comparison_key: "", tags: "" });
+      setDataset(await api(`/api/evaluation/datasets/${dataset.id}`));
+      await loadDatasets(dataset.id);
+    });
+  }
+
+  function generateCases() {
+    act(async () => {
+      await api(`/api/evaluation/datasets/${dataset.id}/generate`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(generator),
+      });
+      setDataset(await api(`/api/evaluation/datasets/${dataset.id}`));
+      await loadDatasets(dataset.id);
+    });
+  }
+
+  function updateCase(caseId, changes) {
+    act(async () => {
+      await api(`/api/evaluation/cases/${caseId}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
+      });
+      setDataset(await api(`/api/evaluation/datasets/${dataset.id}`));
+      await loadDatasets(dataset.id);
+    });
+  }
+
+  function importCases(file) {
+    if (!file) return;
+    act(async () => {
+      const body = new FormData(); body.append("file", file);
+      const result = await api(`/api/evaluation/datasets/${dataset.id}/import`, { method: "POST", body });
+      if (result.errors.length) onError(`${result.imported} imported; ${result.rejected} rejected: ${result.errors[0]}`);
+      setDataset(await api(`/api/evaluation/datasets/${dataset.id}`));
+      await loadDatasets(dataset.id);
+      importRef.current.value = "";
+    });
+  }
+
+  function publishDataset() {
+    act(async () => {
+      await api(`/api/evaluation/datasets/${dataset.id}/publish`, { method: "POST" });
+      setDataset(await api(`/api/evaluation/datasets/${dataset.id}`));
+      await loadDatasets(dataset.id);
+    });
+  }
+
+  function cloneDataset() {
+    act(async () => {
+      const cloned = await api(`/api/evaluation/datasets/${dataset.id}/clone`, { method: "POST" });
+      await loadDatasets(cloned.id);
+    });
+  }
+
+  function startRun() {
+    act(async () => {
+      const created = await api("/api/evaluation/runs", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataset_id: dataset.id, retrieval_mode: runMode }),
+      });
+      await loadRuns(created.id);
+      setTab("runs");
+    });
+  }
+
+  const metricKeys = [
+    ["hit_at_1", "Hit@1"], ["hit_at_3", "Hit@3"], ["hit_at_5", "Hit@5"], ["mrr", "MRR"],
+    ["number_accuracy", "Numbers"], ["citation_recall", "Citation recall"], ["judge_correctness", "Judge correctness"],
+  ];
+  return (
+    <section className="evaluation-workspace">
+      <header className="evaluation-header">
+        <div><div className="eyebrow">Knowledge base evaluation</div><h2>{knowledgeBaseName}</h2></div>
+        <div className="mode-control">
+          <button type="button" className={tab === "datasets" ? "active" : ""} onClick={() => setTab("datasets")}>Test sets</button>
+          <button type="button" className={tab === "runs" ? "active" : ""} onClick={() => setTab("runs")}>Runs</button>
+        </div>
+      </header>
+
+      {tab === "datasets" && (
+        <div className="evaluation-layout">
+          <aside className="evaluation-list">
+            <div className="evaluation-list-heading"><strong>Test sets</strong><button type="button" className="icon-button" onClick={() => setShowCreate((value) => !value)} title="Create test set"><Plus size={15} /></button></div>
+            {showCreate && <form className="evaluation-create" onSubmit={createDataset}><input required placeholder="Test set name" value={newDataset.name} onChange={(event) => setNewDataset({ ...newDataset, name: event.target.value })} /><textarea placeholder="Description" value={newDataset.description} onChange={(event) => setNewDataset({ ...newDataset, description: event.target.value })} /><button className="primary-button" disabled={busy}>Create</button></form>}
+            {datasets.map((item) => <button type="button" className={`evaluation-list-item ${item.id === selectedDatasetId ? "selected" : ""}`} onClick={() => setSelectedDatasetId(item.id)} key={item.id}><strong>{item.name} · v{item.version}</strong><span>{item.status} · {item.approved_case_count}/{item.case_count} approved</span></button>)}
+            {datasets.length === 0 && <p className="quiet">No test sets yet.</p>}
+          </aside>
+          <div className="evaluation-detail">
+            {!dataset ? <div className="qa-empty"><FlaskConical size={28} /><span>Create a test set to begin.</span></div> : (
+              <>
+                <div className="evaluation-dataset-title"><div><h3>{dataset.name} <span>v{dataset.version}</span></h3><p>{dataset.description || "No description"}</p></div><span className={`status ${dataset.status === "PUBLISHED" ? "ready" : "pending"}`}>{dataset.status}</span></div>
+                <div className="evaluation-actions">
+                  {dataset.status === "DRAFT" ? <><button className="secondary-button" onClick={generateCases} disabled={busy}><Sparkles size={15} /> Generate with Qwen</button><input ref={importRef} type="file" accept=".json,.csv" hidden onChange={(event) => importCases(event.target.files?.[0])} /><button className="secondary-button" onClick={() => importRef.current?.click()} disabled={busy}><Upload size={15} /> Import JSON/CSV</button><button className="primary-button" onClick={publishDataset} disabled={busy || dataset.approved_case_count === 0}><ShieldCheck size={15} /> Publish</button></> : <><button className="secondary-button" onClick={cloneDataset} disabled={busy}><Copy size={15} /> Clone new version</button><select value={runMode} onChange={(event) => setRunMode(event.target.value)}><option>PRODUCTION</option><option>SEMANTIC</option><option>BASELINE</option></select><button className="primary-button" onClick={startRun} disabled={busy}><Play size={15} /> Run evaluation</button></>}
+                </div>
+                {dataset.status === "DRAFT" && (
+                  <div className="evaluation-builders">
+                    <section><h4>AI generation</h4><div className="evaluation-generator"><label>Cases<input type="number" min="1" max="30" value={generator.count} onChange={(event) => setGenerator({ ...generator, count: Number(event.target.value) })} /></label><label>Language<select value={generator.language} onChange={(event) => setGenerator({ ...generator, language: event.target.value })}><option value="en">English</option><option value="zh">中文</option></select></label><label>Difficulty<select value={generator.difficulty} onChange={(event) => setGenerator({ ...generator, difficulty: event.target.value })}><option value="mixed">Mixed</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label><label className="check-label"><input type="checkbox" checked={generator.include_insufficient} onChange={(event) => setGenerator({ ...generator, include_insufficient: event.target.checked })} /> Include insufficient</label></div></section>
+                    <form onSubmit={addManualCase}><h4>Manual case</h4><textarea required placeholder="Question" value={manual.question} onChange={(event) => setManual({ ...manual, question: event.target.value })} /><textarea required placeholder="Expected answer" value={manual.expected_answer} onChange={(event) => setManual({ ...manual, expected_answer: event.target.value })} /><div><select value={manual.language} onChange={(event) => setManual({ ...manual, language: event.target.value })}><option value="en">English</option><option value="zh">中文</option></select><input placeholder="Filename" value={manual.filename} onChange={(event) => setManual({ ...manual, filename: event.target.value })} /><input type="number" min="1" placeholder="Page" value={manual.page} onChange={(event) => setManual({ ...manual, page: event.target.value })} /><input placeholder="Comparison key" value={manual.comparison_key} onChange={(event) => setManual({ ...manual, comparison_key: event.target.value })} /><input placeholder="Tags, comma separated" value={manual.tags} onChange={(event) => setManual({ ...manual, tags: event.target.value })} /></div><label className="manual-insufficient"><input type="checkbox" checked={manual.expected_insufficient} onChange={(event) => setManual({ ...manual, expected_insufficient: event.target.checked })} /> Expected answer is insufficient evidence</label><button className="secondary-button" disabled={busy}><Plus size={15} /> Add draft case</button></form>
+                  </div>
+                )}
+                <div className="evaluation-case-list">
+                  {dataset.cases.map((item, index) => <article key={item.id}><div className="case-index">{String(index + 1).padStart(2, "0")}</div><div><strong>{item.question}</strong><p>{item.expected_answer}</p><small>{item.source} · {item.language} · {item.difficulty} · {(item.tags || []).join(", ") || "untagged"}</small>{item.required_evidence.map((target, targetIndex) => <code key={targetIndex}>{target.filename || "any file"} · p.{target.page || "any"} · {target.comparison_key || target.chunk_id || "locator pending"}</code>)}</div>{dataset.status === "DRAFT" && <button className={`case-review ${item.status === "APPROVED" ? "approved" : ""}`} onClick={() => updateCase(item.id, { status: item.status === "APPROVED" ? "DRAFT" : "APPROVED" })}>{item.status === "APPROVED" ? "Approved" : "Approve"}</button>}</article>)}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === "runs" && (
+        <div className="evaluation-layout">
+          <aside className="evaluation-list">
+            <div className="evaluation-list-heading"><strong>Evaluation runs</strong><RefreshCw size={15} /></div>
+            {runs.map((item) => <button type="button" className={`evaluation-list-item ${item.id === selectedRunId ? "selected" : ""}`} onClick={() => setSelectedRunId(item.id)} key={item.id}><strong>{item.retrieval_mode} · {item.status}</strong><span>{item.progress}% · {new Date(item.created_at).toLocaleString()}</span></button>)}
+            {runs.length === 0 && <p className="quiet">No runs yet. Publish a test set first.</p>}
+          </aside>
+          <div className="evaluation-detail">
+            {!run ? <div className="qa-empty"><Play size={28} /><span>Select a run.</span></div> : <>
+              <div className="evaluation-run-heading"><div><div className="eyebrow">{run.retrieval_mode} · {run.status}</div><h3>Run {run.id.slice(0, 8)}</h3></div><div className="run-progress"><span style={{ width: `${run.progress}%` }} /></div></div>
+              {run.error && <div className="warning"><AlertTriangle size={16} /><p>{run.error}</p></div>}
+              {Object.keys(run.metrics || {}).length > 0 && <div className="evaluation-metrics">{metricKeys.map(([key, label]) => <div key={key}><span>{label}</span><strong>{run.metrics[key] == null ? "-" : `${Math.round(run.metrics[key] * 100)}%`}</strong></div>)}</div>}
+              {run.status === "COMPLETE" && runs.filter((item) => item.status === "COMPLETE" && item.id !== run.id).length > 0 && <div className="run-compare"><label>Compare with<select value={comparisonRunId} onChange={(event) => setComparisonRunId(event.target.value)}><option value="">Select another run</option>{runs.filter((item) => item.status === "COMPLETE" && item.id !== run.id).map((item) => <option key={item.id} value={item.id}>{item.retrieval_mode} · {item.id.slice(0, 8)}</option>)}</select></label>{comparisonRun && <div>{metricKeys.map(([key, label]) => <span key={key}><small>{label}</small><strong>{Math.round((run.metrics[key] || 0) * 100)}%</strong><em>{Math.round((comparisonRun.metrics[key] || 0) * 100)}%</em></span>)}</div>}</div>}
+              <div className="evaluation-results">{(run.results || []).map((result) => <EvaluationResult result={result} key={result.id} />)}</div>
+            </>}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function UploadDialog({ file, busy, onCancel, onSubmit }) {
   const yearMatch = file.name.match(/\b(20\d{2})\b/);
   const [company, setCompany] = useState(file.name.match(/^(.+?)\s+(?:20\d{2}|Annual|Interim)/i)?.[1] || "");
@@ -1047,6 +1330,14 @@ function App() {
               <small>{selectedKnowledgeBase?.ready_document_count ?? 0} ready · {selectedKnowledgeBase?.document_count ?? 0} total</small>
             </span>
           </button>
+          <button
+            type="button"
+            className={`knowledge-search-link ${workspaceMode === "evaluation" ? "selected" : ""}`}
+            onClick={() => setWorkspaceMode("evaluation")}
+          >
+            <FlaskConical size={17} />
+            <span><strong>Evaluation</strong><small>Test sets, runs and failure analysis</small></span>
+          </button>
           <div className="section-label"><Database size={15} /> Documents</div>
           <div className="document-list">
             {documents.map((document) => (
@@ -1077,7 +1368,14 @@ function App() {
         </aside>
 
         <main className="main-content">
-          {workspaceMode === "knowledge_base" && selectedKnowledgeBase ? (
+          {workspaceMode === "evaluation" && selectedKnowledgeBase ? (
+            <EvaluationWorkspace
+              key={`evaluation-${selectedKnowledgeBaseId}`}
+              knowledgeBaseId={selectedKnowledgeBaseId}
+              knowledgeBaseName={selectedKnowledgeBase.name}
+              onError={setError}
+            />
+          ) : workspaceMode === "knowledge_base" && selectedKnowledgeBase ? (
             <>
               <section className="knowledge-search-header">
                 <div>

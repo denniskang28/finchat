@@ -64,6 +64,30 @@ async def init_db() -> None:
         )
         await connection.execute(
             text(
+                "CREATE INDEX IF NOT EXISTS ix_evaluation_datasets_kb "
+                "ON evaluation_datasets (knowledge_base_id, created_at)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_evaluation_cases_dataset "
+                "ON evaluation_cases (dataset_id, status)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_evaluation_runs_pending "
+                "ON evaluation_runs (status, created_at)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_evaluation_results_run "
+                "ON evaluation_case_results (run_id, created_at)"
+            )
+        )
+        await connection.execute(
+            text(
                 "CREATE INDEX IF NOT EXISTS ix_chunks_search_vector_gin "
                 "ON chunks USING gin (search_vector)"
             )

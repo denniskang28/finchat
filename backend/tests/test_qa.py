@@ -1,7 +1,7 @@
 import asyncio
 from uuid import uuid4
 
-from app.api.qa import build_qa_evidence
+from app.qa.service import build_qa_evidence
 from app.config import Settings
 from app.qa.provider import DeepSeekChatProvider
 from app.schemas import QAEvidence, RetrievalDebugResponse, RetrievalHit

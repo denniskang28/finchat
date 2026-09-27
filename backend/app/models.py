@@ -1,7 +1,7 @@
 import uuid
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Computed, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, Computed, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -108,4 +108,86 @@ class QARetrieval(Base):
     question: Mapped[str] = mapped_column(Text, nullable=False)
     retrieval_json: Mapped[dict] = mapped_column("retrieval", JSONB, nullable=False)
     evidence_json: Mapped[list] = mapped_column("evidence", JSONB, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvaluationDataset(Base):
+    __tablename__ = "evaluation_datasets"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    published_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+
+
+class EvaluationCase(Base):
+    __tablename__ = "evaluation_cases"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("evaluation_datasets.id", ondelete="CASCADE"), nullable=False
+    )
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_answer: Mapped[str] = mapped_column(Text, nullable=False)
+    language: Mapped[str] = mapped_column(String(20), nullable=False, default="en")
+    expected_insufficient: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    required_evidence_json: Mapped[list] = mapped_column("required_evidence", JSONB, nullable=False, default=list)
+    scope_json: Mapped[dict] = mapped_column("scope", JSONB, nullable=False, default=dict)
+    tags_json: Mapped[list] = mapped_column("tags", JSONB, nullable=False, default=list)
+    difficulty: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="MANUAL")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvaluationRun(Base):
+    __tablename__ = "evaluation_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("evaluation_datasets.id", ondelete="CASCADE"), nullable=False
+    )
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    retrieval_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="PRODUCTION")
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    config_json: Mapped[dict] = mapped_column("config", JSONB, nullable=False, default=dict)
+    metrics_json: Mapped[dict] = mapped_column("metrics", JSONB, nullable=False, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+
+
+class EvaluationCaseResult(Base):
+    __tablename__ = "evaluation_case_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("evaluation_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    case_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("evaluation_cases.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    retrieval_json: Mapped[dict] = mapped_column("retrieval", JSONB, nullable=False, default=dict)
+    final_evidence_json: Mapped[list] = mapped_column("final_evidence", JSONB, nullable=False, default=list)
+    answer: Mapped[str | None] = mapped_column(Text)
+    insufficient_evidence: Mapped[bool | None] = mapped_column(Boolean)
+    citations_json: Mapped[list] = mapped_column("citations", JSONB, nullable=False, default=list)
+    deterministic_metrics_json: Mapped[dict] = mapped_column(
+        "deterministic_metrics", JSONB, nullable=False, default=dict
+    )
+    judge_json: Mapped[dict] = mapped_column("judge", JSONB, nullable=False, default=dict)
+    failure_stage: Mapped[str | None] = mapped_column(String(40))
+    latency_seconds: Mapped[float | None] = mapped_column(Float)
+    error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())

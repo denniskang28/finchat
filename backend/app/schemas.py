@@ -389,3 +389,146 @@ class QAAnswerResponse(BaseModel):
     insufficient_evidence: bool
     citations: list[QACitation]
     model: str
+
+
+class EvaluationEvidenceTarget(BaseModel):
+    document_sha256: str | None = None
+    filename: str | None = None
+    page: int | None = Field(default=None, ge=1)
+    comparison_key: str | None = None
+    content_hash: str | None = None
+    chunk_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_locator(self):
+        if not any(
+            (
+                self.document_sha256,
+                self.filename,
+                self.page,
+                self.comparison_key,
+                self.content_hash,
+                self.chunk_id,
+            )
+        ):
+            raise ValueError("Evidence target must contain at least one locator.")
+        return self
+
+
+class EvaluationDatasetCreate(BaseModel):
+    knowledge_base_id: UUID
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class EvaluationCaseCreate(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    expected_answer: str = Field(min_length=1, max_length=8000)
+    language: str = Field(default="en", min_length=2, max_length=20)
+    expected_insufficient: bool = False
+    required_evidence: list[EvaluationEvidenceTarget] = Field(default_factory=list)
+    scope: dict[str, Any] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    status: Literal["DRAFT", "APPROVED"] = "DRAFT"
+
+
+class EvaluationCaseUpdate(BaseModel):
+    question: str | None = Field(default=None, min_length=1, max_length=4000)
+    expected_answer: str | None = Field(default=None, min_length=1, max_length=8000)
+    language: str | None = Field(default=None, min_length=2, max_length=20)
+    expected_insufficient: bool | None = None
+    required_evidence: list[EvaluationEvidenceTarget] | None = None
+    scope: dict[str, Any] | None = None
+    tags: list[str] | None = Field(default=None, max_length=20)
+    difficulty: Literal["easy", "medium", "hard"] | None = None
+    status: Literal["DRAFT", "APPROVED"] | None = None
+
+
+class EvaluationCaseSummary(BaseModel):
+    id: UUID
+    dataset_id: UUID
+    question: str
+    expected_answer: str
+    language: str
+    expected_insufficient: bool
+    required_evidence: list[EvaluationEvidenceTarget]
+    scope: dict[str, Any]
+    tags: list[str]
+    difficulty: str
+    source: str
+    status: str
+    created_at: datetime
+
+
+class EvaluationDatasetSummary(BaseModel):
+    id: UUID
+    knowledge_base_id: UUID
+    name: str
+    description: str | None
+    status: str
+    version: int
+    case_count: int = 0
+    approved_case_count: int = 0
+    created_at: datetime
+    published_at: datetime | None
+
+
+class EvaluationDatasetDetail(EvaluationDatasetSummary):
+    cases: list[EvaluationCaseSummary]
+
+
+class EvaluationGenerateRequest(BaseModel):
+    count: int = Field(default=10, ge=1, le=30)
+    language: Literal["en", "zh"] = "en"
+    difficulty: Literal["easy", "medium", "hard", "mixed"] = "mixed"
+    include_insufficient: bool = False
+
+
+class EvaluationImportResponse(BaseModel):
+    imported: int
+    rejected: int
+    errors: list[str]
+
+
+class EvaluationRunCreate(BaseModel):
+    dataset_id: UUID
+    retrieval_mode: Literal["BASELINE", "SEMANTIC", "PRODUCTION"] = "PRODUCTION"
+
+
+class EvaluationRunSummary(BaseModel):
+    id: UUID
+    dataset_id: UUID
+    knowledge_base_id: UUID
+    status: str
+    retrieval_mode: str
+    progress: int
+    config: dict[str, Any]
+    metrics: dict[str, Any]
+    error: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class EvaluationCaseResultSummary(BaseModel):
+    id: UUID
+    run_id: UUID
+    case_id: UUID
+    status: str
+    question: str
+    expected_answer: str
+    retrieval: dict[str, Any]
+    final_evidence: list[dict[str, Any]]
+    answer: str | None
+    insufficient_evidence: bool | None
+    citations: list[dict[str, Any]]
+    deterministic_metrics: dict[str, Any]
+    judge: dict[str, Any]
+    failure_stage: str | None
+    latency_seconds: float | None
+    error: str | None
+
+
+class EvaluationRunDetail(EvaluationRunSummary):
+    results: list[EvaluationCaseResultSummary]

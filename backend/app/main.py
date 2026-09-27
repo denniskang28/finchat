@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.documents import router as documents_router
+from app.api.evaluation import router as evaluation_router
 from app.api.knowledge_bases import jobs_router, router as knowledge_bases_router
 from app.api.qa import router as qa_router
 from app.api.retrieval import router as retrieval_router
@@ -21,8 +22,8 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Semantic Table RAG POC",
-    version="0.3.0",
-    description="PDF ingestion, semantic retrieval debugging, and evidence-constrained QA.",
+    version="0.4.0",
+    description="PDF ingestion, semantic retrieval, evidence-constrained QA, and evaluation.",
     lifespan=lifespan,
 )
 
@@ -39,6 +40,7 @@ app.include_router(knowledge_bases_router)
 app.include_router(jobs_router)
 app.include_router(retrieval_router)
 app.include_router(qa_router)
+app.include_router(evaluation_router)
 
 
 @app.get("/api/health")
@@ -47,7 +49,7 @@ async def health() -> dict[str, object]:
     retrieval_provider = AlibabaRetrievalProvider(settings)
     return {
         "status": "ok",
-        "scope": "ingestion-retrieval-and-qa",
+        "scope": "ingestion-retrieval-qa-and-evaluation",
         "table_repair": {
             "enabled": settings.table_repair_enabled,
             "parse_mode": settings.table_parse_mode,
@@ -66,6 +68,11 @@ async def health() -> dict[str, object]:
             "provider": "deepseek",
             "model": settings.deepseek_chat_model,
             "available": bool(settings.deepseek_api_key),
+        },
+        "evaluation": {
+            "provider": "alibaba",
+            "model": settings.alibaba_evaluation_model,
+            "available": bool(settings.dashscope_api_key),
         },
     }
 

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     alibaba_embedding_url: str = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
     alibaba_rerank_model: str = "qwen3-rerank"
     alibaba_rerank_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
+    alibaba_evaluation_model: str = "qwen3.8-flash"
     retrieval_lexical_top_k: int = 20
     retrieval_vector_top_k: int = 20
     retrieval_rrf_top_k: int = 20

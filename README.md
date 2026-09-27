@@ -36,6 +36,8 @@ Semantic embeddings include company, fiscal year, document type, and report titl
 
 The knowledge-base screen is the QA workspace. Its left side contains the conversation, answers, and citations; its right side exposes every retrieval stage and the exact final evidence sent to DeepSeek. `Retrieve Again` creates a new retrieval snapshot without changing the existing answer. `Regenerate Answer` calls DeepSeek again with the current snapshot without rerunning retrieval.
 
+Use `Evaluation` in the sidebar to create versioned test sets manually, import JSON/CSV cases, or generate grounded draft cases with Qwen. Cases must be approved before a test set can be published. Published versions are immutable; clone one to make the next version. Evaluation runs execute asynchronously through the worker and retain per-case retrieval traces, final evidence, DeepSeek answers, citations, deterministic finance checks, and Qwen Judge output. See `docs/evaluation-design.md`.
+
 The worker is horizontally scalable because jobs are claimed with PostgreSQL `FOR UPDATE SKIP LOCKED`:
 
 ```bash
@@ -54,6 +56,7 @@ ALIBABA_EMBEDDING_DIMENSIONS=1024
 ALIBABA_EMBEDDING_URL=https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding
 ALIBABA_RERANK_MODEL=qwen3-rerank
 ALIBABA_RERANK_URL=https://dashscope.aliyuncs.com/compatible-api/v1/reranks
+ALIBABA_EVALUATION_MODEL=qwen3.8-flash
 ```
 
 The fixed experiment is lexical top 20 + vector top 20 -> RRF (`k=60`) top 20 -> rerank -> final top 6. See `docs/retrieval-evaluation.md` for the golden-query results.
