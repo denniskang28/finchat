@@ -23,10 +23,46 @@ from app.schemas import ParsedTable
 
 RetrievalMode = Literal["BASELINE", "SEMANTIC", "PRODUCTION"]
 
+QUERY_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "did", "do", "does",
+    "for", "from", "group", "how", "in", "into", "is", "it", "of", "on",
+    "or", "report", "results", "the", "to", "was", "were", "what", "which",
+    "with", "year", "aia", "annual", "fiscal",
+}
+
 
 def extract_query_years(query: str, available_years: set[int]) -> list[int]:
     requested = {int(value) for value in re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", query)}
+    requested.update(
+        2000 + int(value)
+        for value in re.findall(
+            r"(?i)(?:FY|H[12]|[12]H|Q[1-4])\s*'?([0-9]{2})(?!\d)", query
+        )
+    )
     return sorted(requested & available_years)
+
+
+def lexical_query_terms(query: str) -> list[str]:
+    terms = []
+    for value in re.findall(r"[a-zA-Z][a-zA-Z0-9]+", query.lower()):
+        if value in QUERY_STOPWORDS or re.fullmatch(r"(?:19|20)\d{2}", value):
+            continue
+        if value not in terms:
+            terms.append(value)
+    return terms[:16]
+
+
+def focused_query(query: str, year: int) -> str:
+    terms = lexical_query_terms(query)
+    subject = " ".join(terms) if terms else query
+    return f"{subject}. Fiscal year {year}."
+
+
+def semantic_identity_values(chunk: Chunk) -> tuple[str, str] | None:
+    metadata = chunk.metadata_json or {}
+    title = str(metadata.get("table_title") or "").strip().lower()
+    row_label = str(metadata.get("row_label") or "").strip().lower()
+    return (title, row_label) if title and row_label else None
 
 
 def reciprocal_rank_fusion(
@@ -260,10 +296,7 @@ class RetrievalService:
         document_ids = [document.id for document in active_documents]
         document_by_id = {document.id: document for document in active_documents}
 
-        focused_queries = [
-            f"{query}\nRetrieve the evidence specifically for fiscal year {year}."
-            for year in query_years
-        ]
+        focused_queries = [focused_query(query, year) for year in query_years]
         query_vectors = await self.provider.embed(
             [query, *focused_queries], text_type="query"
         )
@@ -273,7 +306,7 @@ class RetrievalService:
         lexical_score_expr = func.ts_rank_cd(Chunk.search_vector, tsquery, 32).label(
             "lexical_score"
         )
-        lexical_rows = (
+        strict_lexical_rows = (
             await session.execute(
                 select(Chunk, lexical_score_expr)
                 .where(
@@ -285,6 +318,27 @@ class RetrievalService:
                 .limit(lexical_limit)
             )
         ).all()
+
+        terms = lexical_query_terms(query)
+        broad_lexical_rows = []
+        if terms:
+            broad_tsquery = func.to_tsquery("simple", " | ".join(terms))
+            broad_score_expr = func.ts_rank_cd(
+                Chunk.search_vector, broad_tsquery, 32
+            ).label("broad_lexical_score")
+            broad_lexical_rows = (
+                await session.execute(
+                    select(Chunk, broad_score_expr)
+                    .where(
+                        Chunk.document_id.in_(document_ids),
+                        _candidate_filter(mode),
+                        Chunk.representation != "TEXT",
+                        Chunk.search_vector.op("@@")(broad_tsquery),
+                    )
+                    .order_by(broad_score_expr.desc(), Chunk.id)
+                    .limit(lexical_limit * 2)
+                )
+            ).all()
 
         async def vector_search(
             scoped_document_ids: list[UUID], vector: list[float], limit: int
@@ -318,8 +372,26 @@ class RetrievalService:
                 await vector_search(year_document_ids, year_vector, min(10, vector_limit))
             )
 
-        lexical_chunks = [row[0] for row in lexical_rows]
-        lexical_scores = {chunk.id: float(score) for chunk, score in lexical_rows}
+        lexical_chunk_by_id = {
+            chunk.id: chunk
+            for rows in (strict_lexical_rows, broad_lexical_rows)
+            for chunk, _ in rows
+        }
+        lexical_scores: dict[UUID, float] = {}
+        for rows in (strict_lexical_rows, broad_lexical_rows):
+            for chunk, score in rows:
+                lexical_scores[chunk.id] = max(
+                    lexical_scores.get(chunk.id, float("-inf")), float(score)
+                )
+        lexical_ids, _ = reciprocal_rank_fusion(
+            [
+                [chunk.id for chunk, _ in strict_lexical_rows],
+                [chunk.id for chunk, _ in broad_lexical_rows],
+            ],
+            k=self.settings.retrieval_rrf_k,
+            limit=lexical_limit,
+        )
+        lexical_chunks = [lexical_chunk_by_id[chunk_id] for chunk_id in lexical_ids]
         vector_chunk_by_id = {
             chunk.id: chunk for rows in vector_ranked_rows for chunk, _ in rows
         }
@@ -337,9 +409,64 @@ class RetrievalService:
         )
         vector_chunks = [vector_chunk_by_id[chunk_id] for chunk_id in vector_ids]
 
-        chunk_by_id = {chunk.id: chunk for chunk in [*lexical_chunks, *vector_chunks]}
+        seed_identities = {
+            identity
+            for chunk in [
+                *(chunk for chunk, _ in broad_lexical_rows[:20]),
+                *vector_chunks[:10],
+            ]
+            if (identity := semantic_identity_values(chunk))
+        }
+        structured_chunks: list[Chunk] = []
+        if seed_identities:
+            identity_ranks: dict[tuple[str, str], int] = {}
+            ranked_seeds = [
+                *(chunk for chunk, _ in broad_lexical_rows),
+                *vector_chunks,
+            ]
+            for rank, chunk in enumerate(ranked_seeds, start=1):
+                identity = semantic_identity_values(chunk)
+                if identity and identity not in identity_ranks:
+                    identity_ranks[identity] = rank
+            identity_filters = [
+                and_(
+                    func.lower(Chunk.metadata_json["table_title"].astext) == title,
+                    func.lower(Chunk.metadata_json["row_label"].astext) == row_label,
+                )
+                for title, row_label in seed_identities
+            ]
+            structured_chunks = list(
+                (
+                    await session.execute(
+                        select(Chunk)
+                        .where(
+                            Chunk.document_id.in_(document_ids),
+                            _candidate_filter(mode),
+                            or_(*identity_filters),
+                        )
+                        .order_by(Chunk.id)
+                        .limit(lexical_limit * 2)
+                    )
+                ).scalars()
+            )
+            structured_chunks.sort(
+                key=lambda chunk: (
+                    identity_ranks.get(semantic_identity_values(chunk), 10_000),
+                    document_by_id[chunk.document_id].fiscal_year or 0,
+                    str(chunk.id),
+                )
+            )
+
+        chunk_by_id = {
+            chunk.id: chunk
+            for chunk in [*lexical_chunks, *vector_chunks, *structured_chunks]
+        }
         rrf_ids, rrf_scores = reciprocal_rank_fusion(
-            [[chunk.id for chunk in lexical_chunks], [chunk.id for chunk in vector_chunks]],
+            [
+                [chunk.id for chunk in lexical_chunks],
+                [chunk.id for chunk in vector_chunks],
+                [chunk.id for chunk in structured_chunks],
+            ],
             k=self.settings.retrieval_rrf_k,
             limit=self.settings.retrieval_rrf_top_k,
         )
@@ -355,8 +482,69 @@ class RetrievalService:
         }
         final_chunks = []
         per_document_counts: dict[UUID, int] = defaultdict(int)
-        per_document_limit = 3 if len(documents) > 1 else self.settings.retrieval_final_top_k
+        per_document_limit = (
+            3 if len(active_documents) > 1 else self.settings.retrieval_final_top_k
+        )
+        selected_ids: set[UUID] = set()
+        rerank_positions = {
+            chunk.id: rank for rank, chunk in enumerate(reranked_all, start=1)
+        }
+        rrf_positions = {chunk.id: rank for rank, chunk in enumerate(rrf_chunks, start=1)}
+        identity_year_chunks: dict[
+            tuple[str, str], dict[int, list[Chunk]]
+        ] = defaultdict(lambda: defaultdict(list))
+        for chunk in rrf_chunks:
+            identity = semantic_identity_values(chunk)
+            year = document_by_id[chunk.document_id].fiscal_year
+            if identity and year:
+                identity_year_chunks[identity][year].append(chunk)
+        complete_identities = [
+            (identity, by_year)
+            for identity, by_year in identity_year_chunks.items()
+            if query_years and all(year in by_year for year in query_years)
+        ]
+        if complete_identities:
+            _, paired_by_year = min(
+                complete_identities,
+                key=lambda item: sum(
+                    min(rrf_positions[chunk.id] for chunk in item[1][year])
+                    for year in query_years
+                ),
+            )
+            for year in query_years:
+                if len(final_chunks) >= self.settings.retrieval_final_top_k:
+                    break
+                paired_chunk = min(
+                    paired_by_year[year],
+                    key=lambda chunk: rerank_positions.get(chunk.id, 10_000),
+                )
+                final_chunks.append(paired_chunk)
+                selected_ids.add(paired_chunk.id)
+                per_document_counts[paired_chunk.document_id] += 1
+        for year in query_years:
+            if len(final_chunks) >= self.settings.retrieval_final_top_k:
+                break
+            if any(
+                document_by_id[chunk.document_id].fiscal_year == year
+                for chunk in final_chunks
+            ):
+                continue
+            year_chunk = next(
+                (
+                    chunk
+                    for chunk in reranked_all
+                    if document_by_id[chunk.document_id].fiscal_year == year
+                    and per_document_counts[chunk.document_id] < per_document_limit
+                ),
+                None,
+            )
+            if year_chunk:
+                final_chunks.append(year_chunk)
+                selected_ids.add(year_chunk.id)
+                per_document_counts[year_chunk.document_id] += 1
         for chunk in reranked_all:
+            if chunk.id in selected_ids:
+                continue
             if per_document_counts[chunk.document_id] >= per_document_limit:
                 continue
             final_chunks.append(chunk)
@@ -397,7 +585,10 @@ class RetrievalService:
                     "chunk_type": chunk.chunk_type,
                     "representation": chunk.representation,
                     "comparison_key": chunk.comparison_key,
+                    "parent_key": chunk.metadata_json.get("parent_key"),
                     "file": document_by_id[chunk.document_id].filename,
+                    "fiscal_year": document_by_id[chunk.document_id].fiscal_year,
+                    "document_type": document_by_id[chunk.document_id].document_type,
                     "page": chunk.page_number,
                     "table_title": chunk.metadata_json.get("table_title"),
                     "row_label": chunk.metadata_json.get("row_label"),
@@ -425,6 +616,7 @@ class RetrievalService:
             "rerank_model": self.provider.rerank_model,
             "vector_results": hits(vector_chunks),
             "lexical_results": hits(lexical_chunks),
+            "structured_results": hits(structured_chunks),
             "rrf_results": hits(rrf_chunks),
             "reranked_results": hits(final_chunks),
         }

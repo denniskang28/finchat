@@ -1,5 +1,6 @@
 from app.evaluation.metrics import aggregate_metrics, evidence_target_matches, score_case
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,7 +8,10 @@ from app.config import Settings
 from app.evaluation.provider import GeneratedCalculation, create_generation_provider
 from app.evaluation.service import (
     EvaluationService,
+    every_source_supports_expected_value,
+    mentions_fiscal_year,
     numeric_tokens,
+    row_period_matches_document,
     validated_calculation_tokens,
 )
 from app.models import Chunk, Document
@@ -37,6 +41,33 @@ def test_evidence_target_matches_stable_locator_and_citation_subset():
     assert not evidence_target_matches(
         target,
         {"filename": "report.pdf", "page": 90, "chunk_id": "chunk-1"},
+    )
+
+
+def test_section_target_accepts_fact_child_in_same_document_and_page():
+    target = {
+        "filename": "report.pdf",
+        "page": 2,
+        "comparison_key": "p2_section1_disclaimer",
+        "chunk_id": "section-chunk",
+    }
+
+    assert evidence_target_matches(
+        target,
+        {
+            "filename": "report.pdf",
+            "page": 2,
+            "chunk_id": "fact-chunk",
+            "parent_key": "p2_section1_disclaimer",
+        },
+    )
+    assert not evidence_target_matches(
+        target,
+        {
+            "filename": "other.pdf",
+            "page": 2,
+            "parent_key": "p2_section1_disclaimer",
+        },
     )
 
 
@@ -70,6 +101,24 @@ def test_score_case_checks_financial_values_periods_and_citations():
     assert metrics["unit_accuracy"] is True
     assert metrics["period_accuracy"] is True
     assert metrics["citation_recall"] == 1.0
+
+
+def test_multi_source_hit_and_complete_hit_are_reported_separately():
+    targets = [{"chunk_id": "chunk-1"}, {"chunk_id": "chunk-2"}]
+    metrics = score_case(
+        expected_answer="2024: 10%. 2025: 12%.",
+        expected_insufficient=False,
+        required_evidence=targets,
+        retrieval_hits=[{"chunk_id": "chunk-1"}, {"chunk_id": "other"}],
+        actual_answer="2024: 10%. 2025: 12%.",
+        actual_insufficient=False,
+        citations=[{"chunk_id": "chunk-1"}],
+        language="en",
+    )
+
+    assert metrics["hit_at_1"] is True
+    assert metrics["complete_hit_at_1"] is False
+    assert metrics["complete_hit_at_5"] is False
 
 
 def test_numeric_tokens_preserve_percent_and_normalize_commas():
@@ -201,6 +250,63 @@ def test_cross_year_bundle_skips_ambiguous_duplicate_identity_within_a_year():
     )
 
     assert bundles == []
+
+
+def test_cross_year_bundle_skips_historical_row_mislabeled_as_report_year():
+    document_2024 = _document(2024)
+    document_2025 = _document(2025)
+    row_2024 = _corporate_bond_row(document_2024, "32", "32")
+    row_2025 = _corporate_bond_row(document_2025, "32", "32")
+    row_2024.metadata_json["row_label"] = "2024"
+    row_2025.metadata_json["row_label"] = "2024"
+
+    assert row_period_matches_document(row_2024, document_2024)
+    assert not row_period_matches_document(row_2025, document_2025)
+    assert EvaluationService()._build_evidence_bundles(
+        [(row_2024, document_2024), (row_2025, document_2025)],
+        {"single_document": 0, "cross_year": 1, "cross_document": 0},
+        [2024, 2025],
+    ) == []
+
+
+def test_fiscal_year_mentions_accept_full_year_and_financial_period_aliases():
+    assert mentions_fiscal_year("FY2024 annual results", 2024)
+    assert mentions_fiscal_year("1H26 interim results", 2026)
+    assert not mentions_fiscal_year("FY2024 annual results", 2025)
+
+
+def test_each_source_must_contribute_its_answer_value():
+    document_2024 = _document(2024)
+    document_2025 = _document(2025)
+    rows = [
+        (_corporate_bond_row(document_2024, "39", "39"), document_2024),
+        (_corporate_bond_row(document_2025, "36", "36"), document_2025),
+    ]
+
+    assert every_source_supports_expected_value(
+        {"39%", "36%", "2024", "2025"}, rows, [2024, 2025]
+    )
+    assert not every_source_supports_expected_value(
+        {"39%", "2024", "2025"}, rows, [2024, 2025]
+    )
+
+
+def test_correct_insufficient_answer_is_not_labeled_hallucination():
+    case = SimpleNamespace(required_evidence_json=[], expected_insufficient=True)
+    stage = EvaluationService()._failure_stage(
+        case,
+        {},
+        {
+            "insufficient_accuracy": True,
+            "number_accuracy": True,
+            "unit_accuracy": True,
+            "period_accuracy": True,
+            "citation_recall": 1.0,
+        },
+        {"correctness": 1.0, "completeness": 1.0, "faithfulness": 0.75},
+    )
+
+    assert stage is None
 
 
 def test_calculation_validation_requires_source_operands_and_exact_result():

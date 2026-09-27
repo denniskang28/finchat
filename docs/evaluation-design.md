@@ -26,7 +26,7 @@ AI-generated cases are always drafts. The system, rather than the model, selects
 - `CROSS_YEAR`: the same company, document type, chunk type, table/section title, and row/fact label in at least two fiscal years;
 - `CROSS_DOCUMENT`: the same semantic identity in at least two distinct documents.
 
-For multi-source cases, every source must be declared by the model and stored in `required_evidence`. Cross-year questions and expected answers must name every selected year. Numeric answers are accepted only when each number occurs in the selected evidence or is the validated result of a recorded arithmetic expression whose operands occur there. The generator deliberately returns fewer cases when it cannot form a reliable evidence match. Cases are not filtered according to whether the current retriever can find them.
+For multi-source cases, every source must be declared by the model and stored in `required_evidence`. Cross-year questions and expected answers must name every selected year. A table-backed question must include the exact table title to disambiguate repeated metrics. Rows whose explicit period conflicts with the document fiscal year are excluded from cross-year generation. Numeric answers are accepted only when each number occurs in the selected evidence, every source contributes an answer-bearing non-period value, or the number is the validated result of a recorded arithmetic expression whose operands occur there. The generator deliberately returns fewer cases when it cannot form a reliable evidence match. Cases are not filtered according to whether the current retriever can find them.
 
 Generation can be restricted by company, fiscal years, or document IDs. The model is selected from the server-side `ALIBABA_GENERATION_MODELS` or `DEEPSEEK_GENERATION_MODELS` allowlist. Each case records scenario, provider, model, prompt version, source document IDs, source years, calculations, and validation results in `generation_metadata`.
 
@@ -49,7 +49,8 @@ The worker claims pending runs with PostgreSQL row locking and writes each case 
 
 Deterministic metrics:
 
-- Hit@1, Hit@3, Hit@5, evidence recall at 6, and MRR;
+- Hit@1, Hit@3, and Hit@5 for the first relevant evidence;
+- Complete Hit@1, Complete Hit@3, and Complete Hit@5 for all required evidence in multi-source cases, plus evidence recall at 6 and MRR;
 - exact number, unit, and period token preservation;
 - expected versus actual insufficient-evidence status;
 - citation precision, recall, and page accuracy;

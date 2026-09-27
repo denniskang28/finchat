@@ -648,7 +648,7 @@ tbody tr.total { background: #e9eef0; font-weight: 750; }
 .case-review.approved { color: #176957; background: #e2f2ed; border-color: #a9d7ca; }
 .run-progress { width: 180px; height: 7px; margin-top: 8px; overflow: hidden; background: #dfe5e7; border-radius: 4px; }
 .run-progress span { height: 100%; display: block; background: #c8103d; transition: width 200ms ease; }
-.evaluation-metrics { margin-top: 17px; display: grid; grid-template-columns: repeat(7, minmax(70px, 1fr)); border-block: 1px solid #d7dddf; }
+.evaluation-metrics { margin-top: 17px; display: grid; grid-template-columns: repeat(8, minmax(70px, 1fr)); border-block: 1px solid #d7dddf; }
 .evaluation-metrics div { min-width: 0; padding: 11px 8px; border-right: 1px solid #dfe4e6; }
 .evaluation-metrics div:last-child { border-right: 0; }
 .evaluation-metrics span, .evaluation-metrics strong { display: block; }

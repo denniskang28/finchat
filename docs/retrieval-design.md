@@ -2,7 +2,7 @@
 
 ## 1. Retrieval contract
 
-Input is a question, one or more document IDs, and one or more requested experimental modes. Each mode runs independently with exactly one table representation. Output is an inspectable sequence of lexical results, vector results, RRF results, reranked results, and the evidence selected for answer generation.
+Input is a question, one or more document IDs, and one or more requested experimental modes. Each mode runs independently with exactly one table representation. Output is an inspectable sequence of lexical results, vector results, structured table-row expansion, RRF results, reranked results, and the evidence selected for answer generation.
 
 Default settings:
 
@@ -133,14 +133,14 @@ All modes use the same document filter, query, embedding model, distance metric,
 
 - Trim and Unicode-normalize the original question.
 - Retain the original question for embedding and reranking.
-- Query rewrite is off for the initial experiment. If later enabled, return both strings and use the rewritten query for both first-stage channels; reranking still uses the original question.
+- Retain the original query for the global embedding. For each explicit FY/H1/H2/Q period, also embed a compact query containing the financial subject terms and that year.
 - Apply `document_id` and representation filters before ranking.
 
 Chinese questions against an English report may produce no useful PostgreSQL lexical matches under the `simple` configuration. That is an expected, visible channel result, not a reason to hide the lexical stage or silently translate the query.
 
 ### 4.2 Lexical search
 
-Use PostgreSQL full-text search over `chunks.search_vector`:
+Use PostgreSQL full-text search over `chunks.search_vector`. One lane preserves `websearch_to_tsquery`; a second table-focused lane ORs the non-stopword financial terms so natural-language filler cannot suppress an otherwise exact row match. Fuse the two lexical rankings and keep 20.
 
 ```sql
 WITH q AS (
@@ -175,7 +175,11 @@ LIMIT 20;
 
 Assign 1-based `vector_rank`. `vector_score` is reported as cosine similarity, so higher is better.
 
-### 4.4 Reciprocal Rank Fusion
+### 4.4 Structured table-row expansion
+
+Take table title and row label identities from the strongest lexical and vector candidates. Fetch rows with the same normalized title and row label from every requested report year. This is deterministic retrieval expansion, not LLM query planning, and is exposed as `structured_results` in the debug payload.
+
+### 4.5 Reciprocal Rank Fusion
 
 Union candidates by chunk ID and compute:
 
@@ -183,18 +187,20 @@ Union candidates by chunk ID and compute:
 rrf_score(chunk) =
     (1 / (60 + vector_rank)  if present else 0)
   + (1 / (60 + lexical_rank) if present else 0)
+  + (1 / (60 + structured_rank) if present else 0)
 ```
 
 Sort by descending `rrf_score`, then best available component rank, then chunk ID for deterministic ties. Keep the top 20 and assign 1-based `rrf_rank`.
 
 RRF deliberately combines ranks rather than incomparable raw lexical and vector scores.
 
-### 4.5 Rerank and evidence selection
+### 4.6 Rerank and evidence selection
 
 - Send the original question and the top 20 fused chunk `content` values to the reranker.
 - Preserve the chunk-ID-to-provider-index map.
 - Sort by returned relevance score, then source index for deterministic ties.
 - Keep the top 6 as `reranked_results` and `llm_evidence`.
+- When explicit years are present, reserve at least one final slot for each available requested year before filling remaining slots by reranker score.
 - Do not use a score threshold until golden-query distributions are observed; fixed top K is easier to compare in the POC.
 - The answer model receives only the question and these evidence chunks, never the full PDF.
 

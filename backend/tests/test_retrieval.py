@@ -8,7 +8,9 @@ from app.retrieval.context import enrich_semantic_content
 from app.retrieval.service import (
     _candidate_filter,
     extract_query_years,
+    focused_query,
     grade_targets,
+    lexical_query_terms,
     reciprocal_rank_fusion,
 )
 from app.schemas import RetrievalRequest
@@ -92,8 +94,17 @@ def test_production_candidates_exclude_anonymous_semantic_rows():
 
 def test_extract_query_years_only_returns_years_present_in_scope():
     assert extract_query_years(
-        "Compare 2023, 2024 and 2025", {2024, 2025, 2026}
-    ) == [2024, 2025]
+        "Compare 2023, FY2024, 2025 and 1H26", {2024, 2025, 2026}
+    ) == [2024, 2025, 2026]
+
+
+def test_lexical_query_terms_keep_financial_subject_and_remove_question_noise():
+    assert lexical_query_terms(
+        "What was the Unit-linked VONB margin for AIA Group in fiscal year 2025?"
+    ) == ["unit", "linked", "vonb", "margin"]
+    assert focused_query("What was the Unit-linked VONB margin?", 2025) == (
+        "unit linked vonb margin. Fiscal year 2025."
+    )
 
 
 def test_document_context_is_replaced_instead_of_duplicated():

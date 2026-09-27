@@ -18,6 +18,11 @@ def build_qa_evidence(retrieval: RetrievalDebugResponse) -> list[QAEvidence]:
             page=hit.page,
             chunk_type=hit.chunk_type,
             content=hit.content,
+            fiscal_year=hit.fiscal_year,
+            document_type=hit.document_type,
+            table_title=hit.table_title,
+            row_label=hit.row_label,
+            comparison_key=hit.comparison_key,
         )
         for index, hit in enumerate(retrieval.reranked_results, start=1)
     ]

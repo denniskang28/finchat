@@ -59,6 +59,33 @@ def semantic_identity(chunk: Chunk) -> str | None:
     return normalized or None
 
 
+def period_year(value: str | None) -> int | None:
+    if not value:
+        return None
+    full = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", value)
+    if full:
+        return int(full.group(1))
+    short = re.search(r"(?i)(?:FY|H[12]|[12]H|Q[1-4])\s*'?([0-9]{2})(?!\d)", value)
+    return 2000 + int(short.group(1)) if short else None
+
+
+def mentions_fiscal_year(value: str, year: int) -> bool:
+    if str(year) in value:
+        return True
+    suffix = str(year)[-2:]
+    return bool(
+        re.search(
+            rf"(?i)(?:FY|H[12]|[12]H|Q[1-4])\s*'?{re.escape(suffix)}(?!\d)",
+            value,
+        )
+    )
+
+
+def row_period_matches_document(chunk: Chunk, document: Document) -> bool:
+    row_year = period_year((chunk.metadata_json or {}).get("row_label"))
+    return row_year is None or row_year == document.fiscal_year
+
+
 def _evaluate_expression(expression: str) -> float:
     operations = {
         ast.Add: operator.add,
@@ -101,6 +128,19 @@ def validated_calculation_tokens(
             raise ValueError("Calculation result does not match its expression.")
         results.add(result_token)
     return results
+
+
+def every_source_supports_expected_value(
+    expected_numbers: set[str],
+    rows: list[tuple[Chunk, Document]],
+    years: list[int],
+) -> bool:
+    period_numbers = {str(year) for year in years} | {str(year)[-2:] for year in years}
+    expected_financial_values = expected_numbers - period_numbers
+    return not expected_financial_values or all(
+        bool((numeric_tokens(chunk.content) - period_numbers) & expected_financial_values)
+        for chunk, document in rows
+    )
 
 
 def _case_response(case: EvaluationCase) -> dict:
@@ -213,17 +253,37 @@ class EvaluationService:
             expected_source_ids = {source["source_id"] for source in bundle["payload"]["sources"]}
             if set(item.source_ids_used) != expected_source_ids:
                 continue
+            table_titles = {
+                str(source.get("table_title") or "").strip()
+                for source in bundle["payload"]["sources"]
+                if str(source.get("table_title") or "").strip()
+            }
+            if not all(title.lower() in item.question.lower() for title in table_titles):
+                continue
             documents = {str(document.id): document for chunk, document in bundle["rows"]}
             if scenario_type != "SINGLE_DOCUMENT" and len(documents) < 2:
                 continue
             bundle_years = sorted(
                 {document.fiscal_year for chunk, document in bundle["rows"] if document.fiscal_year}
             )
+            if scenario_type == "SINGLE_DOCUMENT" and bundle_years:
+                if not all(mentions_fiscal_year(item.question, year) for year in bundle_years):
+                    continue
             if scenario_type == "CROSS_YEAR":
                 if len(bundle_years) < 2:
                     continue
                 question_and_answer = f"{item.question} {item.expected_answer}"
-                if not all(str(year) in question_and_answer for year in bundle_years):
+                if not all(
+                    mentions_fiscal_year(question_and_answer, year)
+                    for year in bundle_years
+                ):
+                    continue
+            if scenario_type == "CROSS_DOCUMENT" and bundle_years:
+                question_and_answer = f"{item.question} {item.expected_answer}"
+                if not all(
+                    mentions_fiscal_year(question_and_answer, year)
+                    for year in bundle_years
+                ):
                     continue
             source_numbers = set().union(
                 *(numeric_tokens(chunk.content) for chunk, document in bundle["rows"])
@@ -235,6 +295,10 @@ class EvaluationService:
             expected_numbers = numeric_tokens(item.expected_answer)
             if expected_numbers and not expected_numbers.issubset(
                 source_numbers | calculated_numbers
+            ):
+                continue
+            if not every_source_supports_expected_value(
+                expected_numbers, bundle["rows"], bundle_years
             ):
                 continue
             normalized = normalize_question(item.question)
@@ -378,6 +442,7 @@ class EvaluationService:
             for row in rows
             if row[1].fiscal_year
             and semantic_identity(row[0])
+            and row_period_matches_document(row[0], row[1])
             and row[0].chunk_type not in {"TABLE_SUMMARY", "SECTION"}
         ]
         year_groups: dict[tuple[str, str, str], list[tuple[Chunk, Document]]] = {}
@@ -563,12 +628,37 @@ class EvaluationService:
                 answer = await QAService().answer(snapshot)
                 retrieval_payload = retrieval.model_dump(mode="json")
                 document_by_id = {str(document.id): document for document in scoped_documents}
-                for stage in ("vector_results", "lexical_results", "rrf_results", "reranked_results"):
+                for stage in (
+                    "vector_results",
+                    "lexical_results",
+                    "structured_results",
+                    "rrf_results",
+                    "reranked_results",
+                ):
                     for hit in retrieval_payload[stage]:
                         document = document_by_id.get(str(hit["document_id"]))
                         hit["content_hash"] = content_hash(hit["content"])
                         hit["document_sha256"] = document.source_sha256 if document else None
                 citations = [item.model_dump(mode="json") for item in answer["citations"]]
+                hit_by_id = {
+                    str(hit["chunk_id"]): hit
+                    for hit in retrieval_payload["reranked_results"]
+                }
+                scoring_citations = [
+                    {
+                        **citation,
+                        "parent_key": hit_by_id.get(
+                            str(citation["chunk_id"]), {}
+                        ).get("parent_key"),
+                        "comparison_key": hit_by_id.get(
+                            str(citation["chunk_id"]), {}
+                        ).get("comparison_key"),
+                        "document_sha256": hit_by_id.get(
+                            str(citation["chunk_id"]), {}
+                        ).get("document_sha256"),
+                    }
+                    for citation in citations
+                ]
                 deterministic = score_case(
                     expected_answer=case.expected_answer,
                     expected_insufficient=case.expected_insufficient,
@@ -576,7 +666,7 @@ class EvaluationService:
                     retrieval_hits=retrieval_payload["reranked_results"],
                     actual_answer=answer["answer"],
                     actual_insufficient=answer["insufficient_evidence"],
-                    citations=citations,
+                    citations=scoring_citations,
                     language=case.language,
                 )
                 expected_evidence = await self._expected_evidence(
@@ -638,7 +728,7 @@ class EvaluationService:
         self, case: EvaluationCase, retrieval: dict, metrics: dict, judge: dict
     ) -> str | None:
         targets = case.required_evidence_json
-        if targets and not metrics["hit_at_5"]:
+        if targets and not metrics["complete_hit_at_5"]:
             def complete(stage: str) -> bool:
                 return all(
                     any(evidence_target_matches(target, hit) for hit in retrieval[stage])
@@ -647,7 +737,11 @@ class EvaluationService:
 
             if complete("rrf_results"):
                 return "RERANK_FAILURE"
-            if complete("vector_results") or complete("lexical_results"):
+            if (
+                complete("vector_results")
+                or complete("lexical_results")
+                or complete("structured_results")
+            ):
                 return "RRF_FAILURE"
             return "FIRST_STAGE_FAILURE"
         if not metrics["insufficient_accuracy"]:
@@ -662,6 +756,13 @@ class EvaluationService:
             return "CITATION_ERROR"
         if judge.get("error"):
             return "JUDGE_PROVIDER_FAILURE"
+        if (
+            case.expected_insufficient
+            and metrics["insufficient_accuracy"]
+            and judge.get("correctness", 0) >= 0.8
+            and judge.get("completeness", 0) >= 0.8
+        ):
+            return None
         if judge.get("faithfulness", 1) < 0.8:
             return "ANSWER_HALLUCINATION"
         if judge.get("correctness", 1) < 0.8 or judge.get("completeness", 1) < 0.8:

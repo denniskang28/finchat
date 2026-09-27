@@ -288,8 +288,11 @@ class RetrievalHit(BaseModel):
     chunk_type: str
     representation: str
     comparison_key: str | None
+    parent_key: str | None = None
     file: str
     page: int
+    fiscal_year: int | None = None
+    document_type: str | None = None
     table_title: str | None = None
     row_label: str | None = None
     raw_content: str | None = None
@@ -312,6 +315,7 @@ class RetrievalDebugResponse(BaseModel):
     rerank_model: str
     vector_results: list[RetrievalHit]
     lexical_results: list[RetrievalHit]
+    structured_results: list[RetrievalHit] = Field(default_factory=list)
     rrf_results: list[RetrievalHit]
     reranked_results: list[RetrievalHit]
 
@@ -368,6 +372,11 @@ class QAEvidence(BaseModel):
     page: int
     chunk_type: str
     content: str
+    fiscal_year: int | None = None
+    document_type: str | None = None
+    table_title: str | None = None
+    row_label: str | None = None
+    comparison_key: str | None = None
 
 
 class QARetrieveResponse(BaseModel):

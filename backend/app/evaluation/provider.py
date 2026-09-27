@@ -120,13 +120,15 @@ Return JSON only:
 {"cases":[{"bundle_index":0,"scenario_type":"CROSS_YEAR","source_ids_used":["S1","S2"],"question":"...","expected_answer":"...","language":"en","difficulty":"medium","tags":["cross-year","numeric"],"calculations":[{"expression":"6.2 - 5.7","result":"0.5","unit":"USD billion"}]}]}.
 Rules:
 1. Generate exactly one question for each bundle and preserve its bundle_index and scenario_type.
-2. SINGLE_DOCUMENT uses its one source. CROSS_YEAR and CROSS_DOCUMENT must require facts from every source in that bundle.
+2. SINGLE_DOCUMENT uses its one source and must name that report's fiscal year or fiscal period in the question. CROSS_YEAR and CROSS_DOCUMENT must require facts from every source in that bundle.
 3. The expected answer must be directly and completely supported by the sources. Preserve exact numbers, currency, units, dates, FY/H1, and percentage-point distinctions.
-4. A cross-year question and answer must identify every source fiscal_year and use the value for that fiscal_year from each source. Ignore other historical periods present inside a source. Never compare FY with H1 as if they were the same period.
+3a. For a numeric multi-source question, state the answer-bearing value from every source even when the values are equal. Do not copy one source's value to another source.
+4. A cross-year question and answer must identify every source fiscal_year and use only a value whose row/category period matches that fiscal_year, or a current-period value with no separate historical row label. Never relabel a historical row as the report fiscal year. Never compare FY with H1 as if they were the same period.
 5. source_ids_used must contain every source_id that supports the answer and no others.
 6. Do not mention sources, chunks, pages, evidence, or retrieval in the question.
-7. Calculated values are allowed only when requested. Record every calculation using a simple arithmetic expression whose operands occur in the sources. Do not use thousands separators in calculation expressions. Otherwise return an empty calculations list.
-8. Prefer useful finance questions over document-location questions."""
+7. When sources have a table_title, include that exact table_title in the question so the question remains unambiguous among similarly named metrics elsewhere in the knowledge base.
+8. Calculated values are allowed only when requested. Record every calculation using a simple arithmetic expression whose operands occur in the sources. Do not use thousands separators in calculation expressions. Otherwise return an empty calculations list.
+9. Prefer useful finance questions over document-location questions."""
         payload = {
             "prompt_version": GENERATION_PROMPT_VERSION,
             "requested_language": language,

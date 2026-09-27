@@ -24,6 +24,23 @@ def _contains_cjk(text: str) -> bool:
 
 
 def evidence_target_matches(target: dict, hit: dict) -> bool:
+    if (
+        target.get("comparison_key")
+        and hit.get("parent_key")
+        and target["comparison_key"] == hit["parent_key"]
+    ):
+        document_checks = []
+        if target.get("filename") and (hit.get("file") or hit.get("filename")):
+            document_checks.append(
+                (hit.get("file") or hit.get("filename")) == target["filename"]
+            )
+        if target.get("page") and hit.get("page"):
+            document_checks.append(hit.get("page") == target["page"])
+        if target.get("document_sha256") and hit.get("document_sha256"):
+            document_checks.append(
+                hit.get("document_sha256") == target["document_sha256"]
+            )
+        return bool(document_checks) and all(document_checks)
     checks = []
     if target.get("chunk_id") and hit.get("chunk_id"):
         checks.append(str(hit.get("chunk_id")) == str(target["chunk_id"]))
@@ -44,6 +61,14 @@ def _all_targets_within(targets: list[dict], hits: list[dict], k: int) -> bool:
     return bool(targets) and all(
         any(evidence_target_matches(target, hit) for hit in hits[:k])
         for target in targets
+    )
+
+
+def _any_target_within(targets: list[dict], hits: list[dict], k: int) -> bool:
+    return bool(targets) and any(
+        evidence_target_matches(target, hit)
+        for target in targets
+        for hit in hits[:k]
     )
 
 
@@ -99,9 +124,12 @@ def score_case(
 
     return {
         "target_ranks": target_ranks,
-        "hit_at_1": _all_targets_within(required_evidence, retrieval_hits, 1) if has_targets else None,
-        "hit_at_3": _all_targets_within(required_evidence, retrieval_hits, 3) if has_targets else None,
-        "hit_at_5": _all_targets_within(required_evidence, retrieval_hits, 5) if has_targets else None,
+        "hit_at_1": _any_target_within(required_evidence, retrieval_hits, 1) if has_targets else None,
+        "hit_at_3": _any_target_within(required_evidence, retrieval_hits, 3) if has_targets else None,
+        "hit_at_5": _any_target_within(required_evidence, retrieval_hits, 5) if has_targets else None,
+        "complete_hit_at_1": _all_targets_within(required_evidence, retrieval_hits, 1) if has_targets else None,
+        "complete_hit_at_3": _all_targets_within(required_evidence, retrieval_hits, 3) if has_targets else None,
+        "complete_hit_at_5": _all_targets_within(required_evidence, retrieval_hits, 5) if has_targets else None,
         "evidence_recall_at_6": evidence_recall,
         "mrr": (1.0 / min(rank for rank in target_ranks if rank is not None) if found else 0.0) if has_targets else None,
         "number_accuracy": expected_numbers.issubset(actual_numbers),
@@ -148,6 +176,9 @@ def aggregate_metrics(results: Iterable[dict]) -> dict:
         "hit_at_1": average(("deterministic_metrics", "hit_at_1")),
         "hit_at_3": average(("deterministic_metrics", "hit_at_3")),
         "hit_at_5": average(("deterministic_metrics", "hit_at_5")),
+        "complete_hit_at_1": average(("deterministic_metrics", "complete_hit_at_1")),
+        "complete_hit_at_3": average(("deterministic_metrics", "complete_hit_at_3")),
+        "complete_hit_at_5": average(("deterministic_metrics", "complete_hit_at_5")),
         "mrr": average(("deterministic_metrics", "mrr")),
         "number_accuracy": average(("deterministic_metrics", "number_accuracy")),
         "unit_accuracy": average(("deterministic_metrics", "unit_accuracy")),

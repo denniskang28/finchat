@@ -406,6 +406,7 @@ function ChunkExplorer({ chunks, selectedChunkId, onSelect, detail, loading }) {
 const RETRIEVAL_STAGES = [
   ["vector_results", "Vector"],
   ["lexical_results", "Lexical"],
+  ["structured_results", "Table expansion"],
   ["rrf_results", "RRF merged"],
   ["reranked_results", "Reranked"],
 ];
@@ -998,7 +999,7 @@ function EvaluationWorkspace({ knowledgeBaseId, knowledgeBaseName, onError }) {
 
   const metricKeys = [
     ["hit_at_1", "Hit@1"], ["hit_at_3", "Hit@3"], ["hit_at_5", "Hit@5"], ["mrr", "MRR"],
-    ["number_accuracy", "Numbers"], ["citation_recall", "Citation recall"], ["judge_correctness", "Judge correctness"],
+    ["complete_hit_at_5", "Complete@5"], ["number_accuracy", "Numbers"], ["citation_recall", "Citation recall"], ["judge_correctness", "Judge correctness"],
   ];
   return (
     <section className="evaluation-workspace">
