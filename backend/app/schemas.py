@@ -509,6 +509,7 @@ class EvaluationGenerateRequest(BaseModel):
     scenario_mix: EvaluationScenarioMix | None = None
     generation_provider: Literal["alibaba", "deepseek"] = "alibaba"
     generation_model: str | None = Field(default=None, max_length=100)
+    question_style: Literal["USER_REALISTIC", "DIAGNOSTIC"] = "USER_REALISTIC"
     document_ids: list[UUID] = Field(default_factory=list, max_length=100)
     years: list[int] = Field(default_factory=list, max_length=10)
     company: str | None = Field(default=None, max_length=200)

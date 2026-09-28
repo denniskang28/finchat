@@ -227,6 +227,7 @@ async def generate_cases(
             ),
             generation_provider=request.generation_provider,
             generation_model=request.generation_model,
+            question_style=request.question_style,
             document_ids=request.document_ids,
             years=request.years,
             company=request.company,

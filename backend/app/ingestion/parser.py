@@ -331,14 +331,15 @@ class PdfParser:
         title = self._page_title(page_text)
         subtitle = None
         x0, y0, x1, _ = table.bbox
-        nearby_text = page.crop(
-            (
-                max(0.0, float(x0)),
-                max(0.0, float(y0) - 70.0),
-                min(float(page.width), float(x1)),
-                float(y0),
-            )
-        ).extract_text()
+        crop_x0 = max(0.0, min(float(page.width), float(x0)))
+        crop_x1 = max(0.0, min(float(page.width), float(x1)))
+        crop_y1 = max(0.0, min(float(page.height), float(y0)))
+        crop_y0 = max(0.0, crop_y1 - 70.0)
+        nearby_text = (
+            page.crop((crop_x0, crop_y0, crop_x1, crop_y1)).extract_text()
+            if crop_x1 > crop_x0 and crop_y1 > crop_y0
+            else None
+        )
         nearby_lines = [
             cleaned
             for line in (nearby_text or "").splitlines()

@@ -72,7 +72,13 @@ class AlibabaRetrievalProvider:
                 f"Alibaba embedding request failed ({response.status_code}): {response.text[:500]}"
             )
         data = response.json().get("output", {}).get("embeddings", [])
-        ordered = sorted(data, key=lambda item: item["text_index"])
+        try:
+            ordered = sorted(
+                data,
+                key=lambda item: item.get("text_index", item.get("index")),
+            )
+        except TypeError as exc:
+            raise RuntimeError("Alibaba embedding response omitted item indices.") from exc
         embeddings = [item["embedding"] for item in ordered]
         if len(embeddings) != len(texts):
             raise RuntimeError("Alibaba embedding response count did not match the request.")

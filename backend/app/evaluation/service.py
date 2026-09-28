@@ -177,6 +177,7 @@ class EvaluationService:
         scenario_mix: dict | None,
         generation_provider: str,
         generation_model: str | None,
+        question_style: str,
         document_ids: list[UUID],
         years: list[int],
         company: str | None,
@@ -230,6 +231,7 @@ class EvaluationService:
                     language=language,
                     difficulty=difficulty,
                     allow_calculations=allow_calculations,
+                    question_style=question_style,
                 )
             )
 
@@ -253,13 +255,14 @@ class EvaluationService:
             expected_source_ids = {source["source_id"] for source in bundle["payload"]["sources"]}
             if set(item.source_ids_used) != expected_source_ids:
                 continue
-            table_titles = {
-                str(source.get("table_title") or "").strip()
-                for source in bundle["payload"]["sources"]
-                if str(source.get("table_title") or "").strip()
-            }
-            if not all(title.lower() in item.question.lower() for title in table_titles):
-                continue
+            if question_style == "DIAGNOSTIC":
+                table_titles = {
+                    str(source.get("table_title") or "").strip()
+                    for source in bundle["payload"]["sources"]
+                    if str(source.get("table_title") or "").strip()
+                }
+                if not all(title.lower() in item.question.lower() for title in table_titles):
+                    continue
             documents = {str(document.id): document for chunk, document in bundle["rows"]}
             if scenario_type != "SINGLE_DOCUMENT" and len(documents) < 2:
                 continue
@@ -322,6 +325,7 @@ class EvaluationService:
                     "provider": provider.name,
                     "model": provider.model,
                     "prompt_version": GENERATION_PROMPT_VERSION,
+                    "question_style": question_style,
                     "source_document_ids": list(documents),
                     "source_years": bundle_years,
                     "calculations": [value.model_dump() for value in item.calculations],
@@ -369,6 +373,7 @@ class EvaluationService:
                     "provider": provider.name,
                     "model": provider.model,
                     "prompt_version": GENERATION_PROMPT_VERSION,
+                    "question_style": question_style,
                 },
                 difficulty="easy",
                 source="AI",

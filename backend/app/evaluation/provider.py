@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 from app.config import Settings, get_settings
 
 
-GENERATION_PROMPT_VERSION = "evidence-bundle-v1"
+GENERATION_PROMPT_VERSION = "evidence-bundle-v2"
 
 
 class GeneratedCalculation(BaseModel):
@@ -114,7 +114,18 @@ class OpenAICompatibleEvaluationProvider:
         language: str,
         difficulty: str,
         allow_calculations: bool,
+        question_style: str,
     ) -> list[GeneratedQuestion]:
+        question_style_rule = (
+            "7. Write questions as a finance user would naturally ask them. Do not "
+            "mention report titles, presentation names, table titles, chart titles, "
+            "pages, chunks, evidence, or retrieval. Keep business metrics, entities, "
+            "and naturally useful periods, but do not add locator details solely to "
+            "disambiguate sources."
+            if question_style == "USER_REALISTIC"
+            else "7. Include each exact table_title in the question when present. This "
+            "is a diagnostic retrieval test, so explicit table and chart locators are required."
+        )
         system = """Generate grounded financial-report evaluation questions from evidence bundles.
 Return JSON only:
 {"cases":[{"bundle_index":0,"scenario_type":"CROSS_YEAR","source_ids_used":["S1","S2"],"question":"...","expected_answer":"...","language":"en","difficulty":"medium","tags":["cross-year","numeric"],"calculations":[{"expression":"6.2 - 5.7","result":"0.5","unit":"USD billion"}]}]}.
@@ -126,14 +137,17 @@ Rules:
 4. A cross-year question and answer must identify every source fiscal_year and use only a value whose row/category period matches that fiscal_year, or a current-period value with no separate historical row label. Never relabel a historical row as the report fiscal year. Never compare FY with H1 as if they were the same period.
 5. source_ids_used must contain every source_id that supports the answer and no others.
 6. Do not mention sources, chunks, pages, evidence, or retrieval in the question.
-7. When sources have a table_title, include that exact table_title in the question so the question remains unambiguous among similarly named metrics elsewhere in the knowledge base.
+{question_style_rule}
 8. Calculated values are allowed only when requested. Record every calculation using a simple arithmetic expression whose operands occur in the sources. Do not use thousands separators in calculation expressions. Otherwise return an empty calculations list.
-9. Prefer useful finance questions over document-location questions."""
+9. Prefer useful finance questions over document-location questions.""".replace(
+            "{question_style_rule}", question_style_rule
+        )
         payload = {
             "prompt_version": GENERATION_PROMPT_VERSION,
             "requested_language": language,
             "requested_difficulty": difficulty,
             "allow_calculations": allow_calculations,
+            "question_style": question_style,
             "bundles": bundles,
         }
         try:

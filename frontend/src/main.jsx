@@ -829,6 +829,7 @@ function EvaluationWorkspace({ knowledgeBaseId, knowledgeBaseName, onError }) {
     single_document: 5, cross_year: 3, cross_document: 2,
     language: "en", difficulty: "mixed", include_insufficient: true,
     provider_key: "", years: "", company: "", allow_calculations: true,
+    question_style: "USER_REALISTIC",
   });
   const [runMode, setRunMode] = useState("PRODUCTION");
 
@@ -939,6 +940,7 @@ function EvaluationWorkspace({ knowledgeBaseId, knowledgeBaseName, onError }) {
           count: Object.values(scenario_mix).reduce((sum, value) => sum + value, 0),
           scenario_mix, generation_provider, generation_model,
           language: generator.language, difficulty: generator.difficulty,
+          question_style: generator.question_style,
           include_insufficient: generator.include_insufficient,
           years, company: generator.company.trim() || null,
           allow_calculations: generator.allow_calculations,
@@ -1032,6 +1034,7 @@ function EvaluationWorkspace({ knowledgeBaseId, knowledgeBaseName, onError }) {
                       <label>Model<select value={generator.provider_key} onChange={(event) => setGenerator({ ...generator, provider_key: event.target.value })}>{generationProviders.map((item) => <option key={`${item.provider}:${item.model}`} value={`${item.provider}::${item.model}`} disabled={!item.available}>{item.display_name} · {item.model}{item.available ? "" : " (key missing)"}</option>)}</select></label>
                       <label>Language<select value={generator.language} onChange={(event) => setGenerator({ ...generator, language: event.target.value })}><option value="en">English</option><option value="zh">中文</option></select></label>
                       <label>Difficulty<select value={generator.difficulty} onChange={(event) => setGenerator({ ...generator, difficulty: event.target.value })}><option value="mixed">Mixed</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>
+                      <label>Question style<select value={generator.question_style} onChange={(event) => setGenerator({ ...generator, question_style: event.target.value })}><option value="USER_REALISTIC">User realistic</option><option value="DIAGNOSTIC">Diagnostic</option></select></label>
                       <label>Single-document<input type="number" min="0" max="30" value={generator.single_document} onChange={(event) => setGenerator({ ...generator, single_document: Number(event.target.value) })} /></label>
                       <label>Cross-year<input type="number" min="0" max="30" value={generator.cross_year} onChange={(event) => setGenerator({ ...generator, cross_year: Number(event.target.value) })} /></label>
                       <label>Cross-document<input type="number" min="0" max="30" value={generator.cross_document} onChange={(event) => setGenerator({ ...generator, cross_document: Number(event.target.value) })} /></label>

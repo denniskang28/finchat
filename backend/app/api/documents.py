@@ -1,6 +1,7 @@
 from uuid import UUID
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,6 +70,16 @@ async def _get_document(document_id: UUID, session: AsyncSession) -> Document:
 @router.get("/{document_id}", response_model=DocumentSummary)
 async def get_document(document_id: UUID, session: AsyncSession = Depends(get_session)) -> dict:
     return _document_response(await _get_document(document_id, session))
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_document(document_id: UUID, session: AsyncSession = Depends(get_session)) -> Response:
+    document = await _get_document(document_id, session)
+    stored_path = Path(document.file_path)
+    await session.delete(document)
+    await session.commit()
+    stored_path.unlink(missing_ok=True)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.patch("/{document_id}/metadata", response_model=DocumentSummary)

@@ -51,10 +51,10 @@ See `docs/knowledge-base-architecture.md` for the data flow, operational boundar
 Retrieval uses Alibaba Cloud Model Studio. Document and query embeddings use distinct `text_type` values through the native embedding API.
 
 ```dotenv
-ALIBABA_EMBEDDING_MODEL=qwen3.7-text-embedding
+ALIBABA_EMBEDDING_MODEL=qwen3.7-text-embedding-flash
 ALIBABA_EMBEDDING_DIMENSIONS=1024
 ALIBABA_EMBEDDING_URL=https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding
-ALIBABA_RERANK_MODEL=qwen3-rerank
+ALIBABA_RERANK_MODEL=qwen3.7-text-rerank
 ALIBABA_RERANK_URL=https://dashscope.aliyuncs.com/compatible-api/v1/reranks
 ALIBABA_EVALUATION_MODEL=qwen3.8-flash
 ```

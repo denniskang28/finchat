@@ -16,10 +16,10 @@ class Settings(BaseSettings):
     dashscope_api_key: str = ""
     alibaba_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     alibaba_vision_model: str = "qwen3.8-flash"
-    alibaba_embedding_model: str = "qwen3.7-text-embedding"
+    alibaba_embedding_model: str = "qwen3.7-text-embedding-flash"
     alibaba_embedding_dimensions: int = 1024
     alibaba_embedding_url: str = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
-    alibaba_rerank_model: str = "qwen3-rerank"
+    alibaba_rerank_model: str = "qwen3.7-text-rerank"
     alibaba_rerank_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
     alibaba_evaluation_model: str = "qwen3.8-flash"
     alibaba_generation_models: str = "qwen3.8-flash"
