@@ -10,6 +10,8 @@ from app.retrieval.service import (
     extract_query_years,
     focused_query,
     grade_targets,
+    is_group_vonb_chunk,
+    is_group_vonb_time_series,
     lexical_query_terms,
     reciprocal_rank_fusion,
 )
@@ -96,6 +98,35 @@ def test_extract_query_years_only_returns_years_present_in_scope():
     assert extract_query_years(
         "Compare 2023, FY2024, 2025 and 1H26", {2024, 2025, 2026}
     ) == [2024, 2025, 2026]
+
+
+def test_extract_query_years_resolves_chinese_relative_period_to_complete_annual_years():
+    assert extract_query_years(
+        "给我过去5年AIA VONB的变化",
+        {2021, 2022, 2023, 2024, 2025, 2026},
+        annual_years={2021, 2022, 2023, 2024, 2025},
+    ) == [2021, 2022, 2023, 2024, 2025]
+
+
+def test_group_vonb_time_series_requires_metric_and_multiple_years():
+    assert is_group_vonb_time_series(
+        "给我过去5年AIA VONB的变化", [2021, 2022, 2023, 2024, 2025]
+    )
+    assert not is_group_vonb_time_series("AIA VONB", [2025])
+
+
+def test_group_vonb_chunk_excludes_market_level_rows():
+    group_chunk = SimpleNamespace(
+        content="Chart: Total Group VONB ($m). Category: VONB. 2024: 4,783.",
+        metadata_json={"table_title": "Total Group VONB ($m)"},
+    )
+    market_chunk = SimpleNamespace(
+        content="Table: Singapore ($m). Row label: VONB. 2024: 500.",
+        metadata_json={"table_title": "Singapore ($m)"},
+    )
+
+    assert is_group_vonb_chunk(group_chunk)
+    assert not is_group_vonb_chunk(market_chunk)
 
 
 def test_lexical_query_terms_keep_financial_subject_and_remove_question_noise():

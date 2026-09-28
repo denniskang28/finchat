@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import asyncio
+import hashlib
+import json
+import logging
 import re
 import unicodedata
 from collections import defaultdict
@@ -23,6 +25,8 @@ from app.schemas import ParsedTable
 
 RetrievalMode = Literal["BASELINE", "SEMANTIC", "PRODUCTION"]
 
+logger = logging.getLogger(__name__)
+
 QUERY_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "did", "do", "does",
     "for", "from", "group", "how", "in", "into", "is", "it", "of", "on",
@@ -30,8 +34,39 @@ QUERY_STOPWORDS = {
     "with", "year", "aia", "annual", "fiscal",
 }
 
+RELATIVE_YEAR_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+GROUP_VONB_EXCLUSIONS = {
+    "agency", "partnership", "distribution", "margin", "product",
+    "singapore", "thailand", "malaysia", "hong kong", "mainland china",
+    "other markets", "aia china", "aia thailand", "aia singapore",
+    "mcv", "domestic",
+}
 
-def extract_query_years(query: str, available_years: set[int]) -> list[int]:
+
+def _relative_year_count(query: str) -> int | None:
+    normalized = query.lower()
+    match = re.search(
+        r"(?:过去|近|最近)\s*([一二三四五六七八九十]|[0-9]{1,2})\s*年", normalized
+    ) or re.search(
+        r"(?:past|last|previous)\s+([a-z]+|[0-9]{1,2})\s+years?", normalized
+    )
+    if match is None:
+        return None
+    value = match.group(1)
+    return int(value) if value.isdigit() else RELATIVE_YEAR_WORDS.get(value)
+
+
+def extract_query_years(
+    query: str,
+    available_years: set[int],
+    *,
+    annual_years: set[int] | None = None,
+) -> list[int]:
     requested = {int(value) for value in re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", query)}
     requested.update(
         2000 + int(value)
@@ -39,7 +74,14 @@ def extract_query_years(query: str, available_years: set[int]) -> list[int]:
             r"(?i)(?:FY|H[12]|[12]H|Q[1-4])\s*'?([0-9]{2})(?!\d)", query
         )
     )
-    return sorted(requested & available_years)
+    explicit_years = sorted(requested & available_years)
+    if explicit_years:
+        return explicit_years
+    relative_count = _relative_year_count(query)
+    if relative_count is None:
+        return []
+    candidate_years = sorted((annual_years or available_years) & available_years)
+    return candidate_years[-relative_count:]
 
 
 def lexical_query_terms(query: str) -> list[str]:
@@ -56,6 +98,31 @@ def focused_query(query: str, year: int) -> str:
     terms = lexical_query_terms(query)
     subject = " ".join(terms) if terms else query
     return f"{subject}. Fiscal year {year}."
+
+
+def is_group_vonb_time_series(query: str, query_years: list[int]) -> bool:
+    normalized = query.lower()
+    asks_for_change = any(value in normalized for value in ("变化", "趋势", "变动", "change", "trend"))
+    group_context = any(value in normalized for value in ("aia", "集团", "group"))
+    return "vonb" in normalized and len(query_years) > 1 and (asks_for_change or group_context)
+
+
+def asks_for_explanation(query: str) -> bool:
+    normalized = query.lower()
+    return any(value in normalized for value in ("原因", "解释", "驱动", "why", "reason", "driver"))
+
+
+def is_group_vonb_chunk(chunk: Chunk) -> bool:
+    title = str((chunk.metadata_json or {}).get("table_title") or "").lower()
+    text = f"{title} {chunk.content}".lower()
+    if "vonb" not in text or any(value in text for value in GROUP_VONB_EXCLUSIONS):
+        return False
+    return (
+        "total group vonb" in text
+        or "aia group vonb" in text
+        or title.strip() in {"vonb ($m)", "vonb"}
+        or chunk.chunk_type in {"SECTION", "FACT"}
+    )
 
 
 def semantic_identity_values(chunk: Chunk) -> tuple[str, str] | None:
@@ -128,6 +195,21 @@ def _indexable_filter():
     )
 
 
+def _embedding_batch_diagnostics(batch: list[Chunk]) -> list[dict[str, object]]:
+    """Describe a provider request without writing report content to application logs."""
+    return [
+        {
+            "chunk_id": str(chunk.id),
+            "page_number": chunk.page_number,
+            "chunk_type": chunk.chunk_type,
+            "representation": chunk.representation,
+            "content_length": len(chunk.content),
+            "content_sha256": hashlib.sha256(chunk.content.encode()).hexdigest()[:16],
+        }
+        for chunk in batch
+    ]
+
+
 class RetrievalService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -147,7 +229,20 @@ class RetrievalService:
             .where(Chunk.document_id == document_id, _indexable_filter())
             .order_by(Chunk.id)
         )
-        chunks = list((await session.execute(statement)).scalars())
+        indexable_chunks = list((await session.execute(statement)).scalars())
+        empty_chunks = [chunk for chunk in indexable_chunks if not chunk.content.strip()]
+        chunks = [chunk for chunk in indexable_chunks if chunk.content.strip()]
+        if empty_chunks:
+            logger.warning(
+                "Skipping empty embedding chunks: %s",
+                json.dumps(
+                    {
+                        "document_id": str(document_id),
+                        "chunks": _embedding_batch_diagnostics(empty_chunks),
+                    },
+                    sort_keys=True,
+                ),
+            )
         pending = chunks if force else [
             chunk
             for chunk in chunks
@@ -155,16 +250,25 @@ class RetrievalService:
             or chunk.metadata_json.get("embedding_model") != self.provider.embedding_model
         ]
         batches = [pending[index:index + 10] for index in range(0, len(pending), 10)]
-        semaphore = asyncio.Semaphore(4)
 
-        async def embed_batch(batch: list[Chunk]) -> tuple[list[Chunk], list[list[float]]]:
-            async with semaphore:
+        for batch_number, batch in enumerate(batches):
+            diagnostics = _embedding_batch_diagnostics(batch)
+            log_context = {
+                "document_id": str(document_id),
+                "batch_number": batch_number,
+                "batch_size": len(batch),
+                "chunks": diagnostics,
+            }
+            logger.info("Embedding batch started: %s", json.dumps(log_context, sort_keys=True))
+            try:
                 vectors = await self.provider.embed(
                     [chunk.content for chunk in batch], text_type="document"
                 )
-                return batch, vectors
-
-        for batch, vectors in await asyncio.gather(*(embed_batch(batch) for batch in batches)):
+            except Exception:
+                logger.exception(
+                    "Embedding batch failed: %s", json.dumps(log_context, sort_keys=True)
+                )
+                raise
             for chunk, vector in zip(batch, vectors, strict=True):
                 chunk.embedding = vector
                 chunk.metadata_json = {
@@ -172,7 +276,8 @@ class RetrievalService:
                     "embedding_model": self.provider.embedding_model,
                     "embedding_dimensions": self.provider.embedding_dimensions,
                 }
-        await session.commit()
+            await session.commit()
+            logger.info("Embedding batch completed: %s", json.dumps(log_context, sort_keys=True))
         return {
             "document_id": document_id,
             "model": self.provider.embedding_model,
@@ -287,7 +392,17 @@ class RetrievalService:
         available_years = {
             document.fiscal_year for document in documents if document.fiscal_year is not None
         }
-        query_years = extract_query_years(query, available_years)
+        annual_years = {
+            document.fiscal_year
+            for document in documents
+            if document.fiscal_year is not None
+            and "annual" in (document.document_type or "").lower()
+        }
+        query_years = extract_query_years(
+            query, available_years, annual_years=annual_years
+        )
+        group_vonb_time_series = is_group_vonb_time_series(query, query_years)
+        explanation_requested = asks_for_explanation(query)
         active_documents = (
             [document for document in documents if document.fiscal_year in query_years]
             if query_years
@@ -372,6 +487,43 @@ class RetrievalService:
                 await vector_search(year_document_ids, year_vector, min(10, vector_limit))
             )
 
+        group_vonb_chunks: list[Chunk] = []
+        driver_chunks: list[Chunk] = []
+        if group_vonb_time_series:
+            group_vonb_chunks = [
+                chunk
+                for chunk in (
+                    await session.execute(
+                        select(Chunk).where(
+                            Chunk.document_id.in_(document_ids),
+                            _candidate_filter(mode),
+                            Chunk.content.ilike("%VONB%"),
+                        )
+                    )
+                ).scalars()
+                if is_group_vonb_chunk(chunk)
+            ]
+            if explanation_requested:
+                driver_vector = (
+                    await self.provider.embed(
+                        [
+                            "AIA Group VONB growth drivers, business reasons, agency productivity, "
+                            "distribution, product mix, customer demand, and market performance."
+                        ],
+                        text_type="query",
+                    )
+                )[0]
+                for year in query_years:
+                    year_document_ids = [
+                        document.id
+                        for document in active_documents
+                        if document.fiscal_year == year
+                    ]
+                    driver_chunks.extend(
+                        chunk
+                        for chunk, _ in await vector_search(year_document_ids, driver_vector, 3)
+                    )
+
         lexical_chunk_by_id = {
             chunk.id: chunk
             for rows in (strict_lexical_rows, broad_lexical_rows)
@@ -414,6 +566,7 @@ class RetrievalService:
             for chunk in [
                 *(chunk for chunk, _ in broad_lexical_rows[:20]),
                 *vector_chunks[:10],
+                *group_vonb_chunks,
             ]
             if (identity := semantic_identity_values(chunk))
         }
@@ -459,7 +612,13 @@ class RetrievalService:
 
         chunk_by_id = {
             chunk.id: chunk
-            for chunk in [*lexical_chunks, *vector_chunks, *structured_chunks]
+            for chunk in [
+                *lexical_chunks,
+                *vector_chunks,
+                *structured_chunks,
+                *group_vonb_chunks,
+                *driver_chunks,
+            ]
         }
         rrf_ids, rrf_scores = reciprocal_rank_fusion(
             [
@@ -474,6 +633,10 @@ class RetrievalService:
             chunk_by_id[chunk_id]
             for chunk_id in rrf_ids
         ]
+        for chunk in [*group_vonb_chunks, *driver_chunks]:
+            if chunk.id not in rrf_ids:
+                rrf_ids.append(chunk.id)
+                rrf_chunks.append(chunk)
 
         rerank_pairs = await self.provider.rerank(query, [chunk.content for chunk in rrf_chunks])
         reranked_all = [rrf_chunks[index] for index, _ in rerank_pairs]
@@ -482,8 +645,13 @@ class RetrievalService:
         }
         final_chunks = []
         per_document_counts: dict[UUID, int] = defaultdict(int)
+        final_limit = (
+            max(self.settings.retrieval_final_top_k, len(query_years) * 2)
+            if group_vonb_time_series
+            else self.settings.retrieval_final_top_k
+        )
         per_document_limit = (
-            3 if len(active_documents) > 1 else self.settings.retrieval_final_top_k
+            3 if len(active_documents) > 1 else final_limit
         )
         selected_ids: set[UUID] = set()
         rerank_positions = {
@@ -498,6 +666,49 @@ class RetrievalService:
             year = document_by_id[chunk.document_id].fiscal_year
             if identity and year:
                 identity_year_chunks[identity][year].append(chunk)
+        if group_vonb_time_series:
+            for year in query_years:
+                candidates = [
+                    chunk
+                    for chunk in group_vonb_chunks
+                    if document_by_id[chunk.document_id].fiscal_year == year
+                ]
+                if not candidates:
+                    continue
+                series_chunk = min(
+                    candidates,
+                    key=lambda chunk: (
+                        0 if "total group vonb" in chunk.content.lower() else 1,
+                        0
+                        if (
+                            chunk.representation == "SEMANTIC_ROW"
+                            and re.search(rf"(?<!\d){year}(?!\d)\s*:", chunk.content)
+                        )
+                        else 1,
+                        rerank_positions.get(chunk.id, 10_000),
+                    ),
+                )
+                final_chunks.append(series_chunk)
+                selected_ids.add(series_chunk.id)
+                per_document_counts[series_chunk.document_id] += 1
+            if explanation_requested:
+                driver_ids = {chunk.id for chunk in driver_chunks}
+                for year in query_years:
+                    driver_chunk = next(
+                        (
+                            chunk
+                            for chunk in reranked_all
+                            if chunk.id in driver_ids
+                            and document_by_id[chunk.document_id].fiscal_year == year
+                            and chunk.id not in selected_ids
+                            and per_document_counts[chunk.document_id] < per_document_limit
+                        ),
+                        None,
+                    )
+                    if driver_chunk is not None:
+                        final_chunks.append(driver_chunk)
+                        selected_ids.add(driver_chunk.id)
+                        per_document_counts[driver_chunk.document_id] += 1
         complete_identities = [
             (identity, by_year)
             for identity, by_year in identity_year_chunks.items()
@@ -512,7 +723,7 @@ class RetrievalService:
                 ),
             )
             for year in query_years:
-                if len(final_chunks) >= self.settings.retrieval_final_top_k:
+                if len(final_chunks) >= final_limit:
                     break
                 paired_chunk = min(
                     paired_by_year[year],
@@ -522,7 +733,7 @@ class RetrievalService:
                 selected_ids.add(paired_chunk.id)
                 per_document_counts[paired_chunk.document_id] += 1
         for year in query_years:
-            if len(final_chunks) >= self.settings.retrieval_final_top_k:
+            if len(final_chunks) >= final_limit:
                 break
             if any(
                 document_by_id[chunk.document_id].fiscal_year == year
@@ -543,13 +754,15 @@ class RetrievalService:
                 selected_ids.add(year_chunk.id)
                 per_document_counts[year_chunk.document_id] += 1
         for chunk in reranked_all:
+            if len(final_chunks) >= final_limit:
+                break
             if chunk.id in selected_ids:
                 continue
             if per_document_counts[chunk.document_id] >= per_document_limit:
                 continue
             final_chunks.append(chunk)
             per_document_counts[chunk.document_id] += 1
-            if len(final_chunks) >= self.settings.retrieval_final_top_k:
+            if len(final_chunks) >= final_limit:
                 break
         final_ranks = {chunk.id: rank for rank, chunk in enumerate(final_chunks, start=1)}
 

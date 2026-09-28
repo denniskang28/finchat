@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Callable
 
 import httpx
 
 from app.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class AlibabaRetrievalProvider:
@@ -27,23 +31,44 @@ class AlibabaRetrievalProvider:
             "Content-Type": "application/json",
         }
 
-    async def _post(self, url: str, payload: dict) -> httpx.Response:
+    async def _post(
+        self,
+        url: str,
+        payload: dict,
+        *,
+        max_attempts: int = 3,
+        retryable_response: Callable[[httpx.Response], bool] | None = None,
+    ) -> httpx.Response:
         last_error: Exception | None = None
+        last_response: httpx.Response | None = None
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            for attempt in range(3):
+            for attempt in range(max_attempts):
                 try:
                     response = await client.post(url, headers=self._headers(), json=payload)
                 except httpx.HTTPError as exc:
                     last_error = exc
                 else:
-                    if response.status_code not in {429, 500, 502, 503, 504}:
+                    should_retry = response.status_code in {429, 500, 502, 503, 504}
+                    if retryable_response is not None:
+                        should_retry = should_retry or retryable_response(response)
+                    if not should_retry:
                         return response
+                    last_response = response
                     last_error = RuntimeError(
                         f"Alibaba request failed ({response.status_code}): {response.text[:500]}"
                     )
-                if attempt < 2:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-        raise RuntimeError(f"Alibaba request failed after 3 attempts: {last_error}")
+                if attempt < max_attempts - 1:
+                    delay_seconds = min(8.0, 0.75 * (2**attempt))
+                    logger.warning(
+                        "Retrying Alibaba request after attempt %s/%s in %.2fs.",
+                        attempt + 1,
+                        max_attempts,
+                        delay_seconds,
+                    )
+                    await asyncio.sleep(delay_seconds)
+        if last_response is not None:
+            return last_response
+        raise RuntimeError(f"Alibaba request failed after {max_attempts} attempts: {last_error}")
 
     async def embed(
         self, texts: list[str], *, text_type: str = "document"
@@ -66,7 +91,15 @@ class AlibabaRetrievalProvider:
             "input": {"texts": texts},
             "parameters": parameters,
         }
-        response = await self._post(self.embedding_url, payload)
+        response = await self._post(
+            self.embedding_url,
+            payload,
+            max_attempts=6,
+            retryable_response=lambda candidate: (
+                candidate.status_code == 400
+                and "already running" in candidate.text.lower()
+            ),
+        )
         if response.is_error:
             raise RuntimeError(
                 f"Alibaba embedding request failed ({response.status_code}): {response.text[:500]}"
